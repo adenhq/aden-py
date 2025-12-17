@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openai-meter"
+version = "0.1.0"
+description = "OpenAI SDK metering for AI Cost ERP - usage tracking, budget enforcement, and cost control"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Aden", email = "aden@example.com" }
+]
+keywords = ["openai", "metering", "cost", "usage", "billing", "erp", "livekit"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "openai>=1.0.0",
+    "tiktoken>=0.5.0",
+]
+
+[project.optional-dependencies]
+livekit = [
+    "livekit-agents>=0.8.0",
+    "livekit-plugins-openai>=0.8.0",
+]
+timescale = [
+    "asyncpg>=0.29.0",
+]
+timescale-sync = [
+    "psycopg2-binary>=2.9.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/aden/openai-meter-py"
+Documentation = "https://github.com/aden/openai-meter-py#readme"
+Repository = "https://github.com/aden/openai-meter-py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openai_meter"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
