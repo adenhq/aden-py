@@ -5,7 +5,7 @@ Provides simple one-liner instrumentation for LiveKit voice agents with:
 - Session-level cost tracking
 - Budget enforcement with auto-disconnect
 - Local file logging (JSONL)
-- TimescaleDB persistence (auto-detected)
+- HTTP API transport (recommended for production)
 - Custom emitter support
 
 Usage:
@@ -26,12 +26,15 @@ Environment variables (all optional):
     METER_MAX_COST: Default max cost per session in USD
     METER_LOG_DIR: Directory for metric log files
     METER_LOG_TO_FILE: Set to "false" to disable file logging
-    TIMESCALE_DSN: PostgreSQL/TimescaleDB connection string (auto-enables DB persistence)
+    METER_API_URL: API endpoint for metrics (recommended for production)
+    METER_API_KEY: API key for authentication
+    TIMESCALE_DSN: Direct DB connection (fallback, not recommended for production)
 """
 
 import asyncio
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
@@ -40,6 +43,9 @@ from .file_logger import MetricFileLogger, DEFAULT_LOG_DIR
 from .types import MetricEvent, NormalizedUsage
 
 logger = logging.getLogger(__name__)
+
+# Thread lock for global state
+_global_lock = threading.Lock()
 
 # Type alias for callbacks
 BudgetCallback = Callable[[str, float, float], None]
@@ -470,47 +476,80 @@ class LiveKitMeter:
 # Simple One-Liner Instrumentation
 # =============================================================================
 
-# Global meter instance
+# Global meter instance (protected by _global_lock)
 _meter: Optional[LiveKitMeter] = None
 
-# Track instrumented sessions to prevent double-instrumentation
+# Track instrumented sessions to prevent double-instrumentation (protected by _global_lock)
 _instrumented_sessions: set[str] = set()
 
-# Global TimescaleDB emitter (created lazily from TIMESCALE_DSN)
-_timescale_emitter: Optional[Any] = None
-_timescale_init_attempted: bool = False
+# Global transport emitter (created lazily from METER_API_URL or TIMESCALE_DSN)
+# Protected by _global_lock
+_transport_emitter: Optional[Any] = None
+_transport_init_attempted: bool = False
+_transport_type: Optional[str] = None  # "http" or "timescale"
 
 
-def _get_timescale_emitter() -> Optional[Any]:
-    """Get or create the TimescaleDB emitter from TIMESCALE_DSN."""
-    global _timescale_emitter, _timescale_init_attempted
+def _get_transport_emitter() -> Optional[Any]:
+    """Get or create the transport emitter from environment variables.
 
-    if _timescale_init_attempted:
-        return _timescale_emitter
+    Thread-safe: uses _global_lock for initialization.
 
-    _timescale_init_attempted = True
-    dsn = os.environ.get('TIMESCALE_DSN')
+    Priority:
+    1. METER_API_URL - HTTP API transport (recommended)
+    2. TIMESCALE_DSN - Direct database connection (fallback)
+    """
+    global _transport_emitter, _transport_init_attempted, _transport_type
 
-    if not dsn:
-        return None
+    # Fast path: already initialized
+    if _transport_init_attempted:
+        return _transport_emitter
 
-    try:
-        from .timescale import SyncTimescaleEmitter
-        _timescale_emitter = SyncTimescaleEmitter(
-            dsn=dsn,
-            batch_size=50,
-            flush_interval=5.0,
-        )
-        logger.info(f"TimescaleDB emitter initialized from TIMESCALE_DSN")
-        return _timescale_emitter
-    except ImportError:
-        logger.warning(
-            "TIMESCALE_DSN is set but psycopg2 is not installed. "
-            "Install with: pip install openai-meter[timescale-sync]"
-        )
-        return None
-    except Exception as e:
-        logger.warning(f"Failed to initialize TimescaleDB emitter: {e}")
+    with _global_lock:
+        # Double-check after acquiring lock
+        if _transport_init_attempted:
+            return _transport_emitter
+
+        _transport_init_attempted = True
+
+        # Check for HTTP API transport first (recommended)
+        api_url = os.environ.get('METER_API_URL')
+        if api_url:
+            try:
+                from .http_transport import HttpTransport
+                api_key = os.environ.get('METER_API_KEY')
+                _transport_emitter = HttpTransport(
+                    api_url=api_url,
+                    api_key=api_key,
+                    batch_size=50,
+                    flush_interval=5.0,
+                )
+                _transport_type = "http"
+                logger.info(f"HTTP transport initialized: {api_url}")
+                return _transport_emitter
+            except Exception as e:
+                logger.warning(f"Failed to initialize HTTP transport: {e}")
+
+        # Fallback to TimescaleDB direct connection
+        dsn = os.environ.get('TIMESCALE_DSN')
+        if dsn:
+            try:
+                from .timescale import SyncTimescaleEmitter
+                _transport_emitter = SyncTimescaleEmitter(
+                    dsn=dsn,
+                    batch_size=50,
+                    flush_interval=5.0,
+                )
+                _transport_type = "timescale"
+                logger.info("TimescaleDB transport initialized (direct connection)")
+                return _transport_emitter
+            except ImportError:
+                logger.warning(
+                    "TIMESCALE_DSN is set but psycopg2 is not installed. "
+                    "Install with: pip install openai-meter[timescale-sync]"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize TimescaleDB transport: {e}")
+
         return None
 
 
@@ -585,16 +624,18 @@ def instrument(
     session_id = ctx.room.name
     room_name = ctx.room.name
 
-    # Prevent double-instrumentation
-    if session_id in _instrumented_sessions:
-        logger.warning(f"Session {session_id} already instrumented, skipping")
-        if _meter:
-            tracker = _meter.get_session(session_id)
-            if tracker:
-                return tracker
-        return SessionCostTracker(session_id=session_id, room_name=room_name)
+    # Thread-safe check and registration of session
+    with _global_lock:
+        # Prevent double-instrumentation
+        if session_id in _instrumented_sessions:
+            logger.warning(f"Session {session_id} already instrumented, skipping")
+            if _meter:
+                tracker = _meter.get_session(session_id)
+                if tracker:
+                    return tracker
+            return SessionCostTracker(session_id=session_id, room_name=room_name)
 
-    _instrumented_sessions.add(session_id)
+        _instrumented_sessions.add(session_id)
 
     # Get configuration from environment with parameter overrides
     effective_max_cost = max_cost
@@ -639,18 +680,18 @@ def instrument(
             else:
                 on_budget_warning(sid, current, max_budget)
 
-    # Build effective emitter (combine TimescaleDB + custom if both present)
-    timescale_emitter = _get_timescale_emitter()
+    # Build effective emitter (combine transport + custom if both present)
+    transport_emitter = _get_transport_emitter()
     effective_emitter = custom_emitter
 
-    if timescale_emitter and custom_emitter:
+    if transport_emitter and custom_emitter:
         # Combine both emitters
         def combined_emitter(event: MetricEvent) -> None:
-            timescale_emitter(event)
+            transport_emitter(event)
             custom_emitter(event)
         effective_emitter = combined_emitter
-    elif timescale_emitter:
-        effective_emitter = timescale_emitter
+    elif transport_emitter:
+        effective_emitter = transport_emitter
 
     # Initialize meter if not already done
     if _meter is None:
@@ -685,19 +726,21 @@ def instrument(
     def _on_disconnected() -> None:
         if _meter:
             _meter.end_session(session_id)
-        _instrumented_sessions.discard(session_id)
-        # Flush TimescaleDB emitter to ensure metrics are persisted
-        if timescale_emitter and hasattr(timescale_emitter, 'flush'):
+        # Thread-safe removal from instrumented sessions
+        with _global_lock:
+            _instrumented_sessions.discard(session_id)
+        # Flush transport emitter to ensure metrics are persisted
+        if transport_emitter and hasattr(transport_emitter, 'flush'):
             try:
-                timescale_emitter.flush()
+                transport_emitter.flush()
             except Exception as e:
-                logger.warning(f"Failed to flush TimescaleDB emitter: {e}")
+                logger.warning(f"Failed to flush transport emitter: {e}")
 
     logger.info(
         f"Instrumented session {session_id} "
         f"(max_cost=${effective_max_cost or 'unlimited'}, "
         f"log_to_file={effective_log_to_file}, "
-        f"timescale={'enabled' if timescale_emitter else 'disabled'})"
+        f"transport={_transport_type or 'none'})"
     )
 
     return tracker

@@ -223,6 +223,11 @@ BeforeRequestHook = Callable[
 """Hook called before each API request, allowing user-defined rate limiting."""
 
 
+# Error callback type
+EmitErrorHandler = Callable[["MetricEvent", Exception], None]
+"""Callback when metric emission fails."""
+
+
 @dataclass
 class MeterOptions:
     """Options for the metered OpenAI client."""
@@ -243,16 +248,32 @@ class MeterOptions:
     """Custom metadata to pass to beforeRequest hook."""
 
     # Performance options
-    async_emit: bool = True
-    """Whether to emit metrics asynchronously (fire-and-forget)."""
+    async_emit: bool = False
+    """Whether to emit metrics asynchronously (fire-and-forget).
+
+    WARNING: When True, emission errors are silently logged and metrics may be lost.
+    Set to True only if you accept potential data loss for lower latency.
+    Default changed to False in v0.2.0 for reliability.
+    """
 
     sample_rate: float = 1.0
-    """Sampling rate for metrics (0.0-1.0)."""
+    """Sampling rate for metrics (0.0-1.0). Values < 1.0 will randomly drop metrics."""
+
+    on_emit_error: EmitErrorHandler | None = None
+    """Callback when metric emission fails. Receives the event and exception.
+
+    If not set, errors are logged to the 'openai_meter' logger.
+    Use this to implement custom error handling, alerting, or fallback storage.
+    """
 
 
 @dataclass
 class BudgetConfig:
-    """Budget configuration for guardrails."""
+    """Budget configuration for guardrails.
+
+    NOTE: This is a planned feature and is not yet implemented in the metering logic.
+    It is exported for API stability. Use `before_request` hook for budget enforcement.
+    """
 
     max_input_tokens: int | None = None
     """Maximum input tokens allowed per request."""

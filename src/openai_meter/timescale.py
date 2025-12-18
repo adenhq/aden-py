@@ -8,12 +8,13 @@ for storing LLM usage metrics with automatic partitioning and compression.
 import asyncio
 import json
 import logging
+import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from threading import Lock, Timer
 from typing import Any
 
-from .types import MetricEmitter, MetricEvent
+from .types import MetricEvent
 
 logger = logging.getLogger(__name__)
 
@@ -395,11 +396,9 @@ class SyncTimescaleEmitter:
         try:
             conn = self._get_connection()
             with conn.cursor() as cur:
-                # Convert INSERT_SQL from asyncpg ($1, $2) to psycopg2 (%s, %s) format
-                # Replace in descending order so %17 is replaced before %1 matches %10, %11, etc.
-                insert_sql = INSERT_SQL.replace("$", "%")
-                for i in range(17, 0, -1):
-                    insert_sql = insert_sql.replace(f"%{i}", "%s")
+                # Convert INSERT_SQL from asyncpg ($1, $2, ...) to psycopg2 (%s, %s, ...) format
+                # Use regex to replace all $N placeholders with %s
+                insert_sql = re.sub(r'\$\d+', '%s', INSERT_SQL)
 
                 rows = [_event_to_row(event) for event in to_flush]
                 cur.executemany(insert_sql, rows)

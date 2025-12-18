@@ -6,11 +6,12 @@ and emit metrics without modifying the SDK.
 """
 
 import asyncio
+import logging
 import random
 import time
 from datetime import datetime
 from functools import wraps
-from typing import Any, AsyncIterator, TypeVar
+from typing import Any, AsyncIterator, Iterator, TypeVar
 from uuid import uuid4
 
 from openai import AsyncOpenAI, OpenAI
@@ -27,6 +28,8 @@ from .types import (
     RequestMetadata,
     ToolCallMetric,
 )
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -151,6 +154,35 @@ async def _execute_before_request_hook(
         await asyncio.sleep(result.delay_ms / 1000)
 
 
+def _run_coroutine_sync(coro: Any) -> Any:
+    """Run a coroutine from sync context, handling Python 3.10+ event loop changes."""
+    try:
+        # Try to get the running loop first - if one exists, we're in async context
+        asyncio.get_running_loop()
+        # If we get here, we're in an async context - can't use run_until_complete
+        raise RuntimeError(
+            "Cannot call sync metering methods from async context. "
+            "Use AsyncOpenAI client instead, or call from a sync context."
+        )
+    except RuntimeError as e:
+        # No running loop - this is the expected case for sync code
+        if "no running event loop" not in str(e).lower():
+            raise  # Re-raise if it's a different RuntimeError
+
+    try:
+        # Python 3.10+: get_event_loop() may raise if no loop exists
+        # Use asyncio.run() which creates a new loop and closes it properly
+        return asyncio.run(coro)
+    except RuntimeError as e:
+        # Fallback for edge cases (e.g., nested event loops in some environments)
+        if "cannot be called from a running event loop" in str(e):
+            raise RuntimeError(
+                "Cannot call sync metering methods from async context. "
+                "Use AsyncOpenAI client instead."
+            ) from e
+        raise
+
+
 def _execute_before_request_hook_sync(
     params: dict[str, Any],
     context: BeforeRequestContext,
@@ -162,9 +194,7 @@ def _execute_before_request_hook_sync(
 
     result = options.before_request(params, context)
     if asyncio.iscoroutine(result):
-        # Run in event loop if we get a coroutine
-        loop = asyncio.get_event_loop()
-        result = loop.run_until_complete(result)
+        result = _run_coroutine_sync(result)
 
     if result.action == BeforeRequestAction.CANCEL:
         raise RequestCancelledError(result.reason, context)
@@ -199,23 +229,41 @@ def _create_metric_event(
     )
 
 
+def _handle_emit_error(event: MetricEvent, error: Exception, options: MeterOptions) -> None:
+    """Handle emission error - call callback or log."""
+    if options.on_emit_error:
+        try:
+            options.on_emit_error(event, error)
+        except Exception as callback_error:
+            logger.error(f"Error in on_emit_error callback: {callback_error}")
+    else:
+        logger.error(f"Error emitting metric (trace_id={event.trace_id}): {error}")
+
+
 async def _emit_metric(event: MetricEvent, options: MeterOptions) -> None:
     """Emits a metric, handling async/sync emitters."""
     if options.async_emit:
-        # Fire-and-forget
+        # Fire-and-forget with error handling
+        async def emit_with_error_handling() -> None:
+            try:
+                result = options.emit_metric(event)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                _handle_emit_error(event, e, options)
+
+        try:
+            asyncio.create_task(emit_with_error_handling())
+        except Exception as e:
+            _handle_emit_error(event, e, options)
+    else:
         try:
             result = options.emit_metric(event)
             if asyncio.iscoroutine(result):
-                asyncio.create_task(result)
+                await result
         except Exception as e:
-            # Log but don't block
-            import logging
-
-            logging.getLogger(__name__).error(f"Error emitting metric: {e}")
-    else:
-        result = options.emit_metric(event)
-        if asyncio.iscoroutine(result):
-            await result
+            _handle_emit_error(event, e, options)
+            raise  # Re-raise in sync mode so caller knows emission failed
 
 
 def _emit_metric_sync(event: MetricEvent, options: MeterOptions) -> None:
@@ -223,12 +271,9 @@ def _emit_metric_sync(event: MetricEvent, options: MeterOptions) -> None:
     try:
         result = options.emit_metric(event)
         if asyncio.iscoroutine(result):
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(result)
+            result = _run_coroutine_sync(result)
     except Exception as e:
-        import logging
-
-        logging.getLogger(__name__).error(f"Error emitting metric: {e}")
+        _handle_emit_error(event, e, options)
 
 
 def _should_meter(options: MeterOptions) -> bool:
@@ -256,6 +301,7 @@ class MeteredAsyncStream:
         self._request_id: str | None = None
         self._tool_calls: list[ToolCallMetric] = []
         self._done = False
+        self._error: str | None = None
 
     def __aiter__(self) -> "MeteredAsyncStream":
         return self
@@ -292,17 +338,101 @@ class MeteredAsyncStream:
                 self._done = True
                 await self._emit_final_metric()
             raise
+        except Exception as e:
+            # Stream error - emit partial metrics before re-raising
+            if not self._done:
+                self._done = True
+                self._error = str(e)
+                await self._emit_final_metric()
+            raise
 
     async def _emit_final_metric(self) -> None:
-        """Emit the final metric when stream ends."""
+        """Emit the final metric when stream ends (normally or with error)."""
         event = _create_metric_event(
             self._req_meta,
             self._request_id,
             (time.time() - self._t0) * 1000,
             self._final_usage,
             self._tool_calls if self._tool_calls else None,
+            error=self._error,
         )
         await _emit_metric(event, self._options)
+
+
+class MeteredSyncStream:
+    """Wraps a sync stream to meter it."""
+
+    def __init__(
+        self,
+        stream: Iterator[Any],
+        req_meta: RequestMetadata,
+        t0: float,
+        options: MeterOptions,
+    ):
+        self._stream = stream
+        self._req_meta = req_meta
+        self._t0 = t0
+        self._options = options
+        self._final_usage: NormalizedUsage | None = None
+        self._request_id: str | None = None
+        self._tool_calls: list[ToolCallMetric] = []
+        self._done = False
+        self._error: str | None = None
+
+    def __iter__(self) -> "MeteredSyncStream":
+        return self
+
+    def __next__(self) -> Any:
+        try:
+            chunk = next(self._stream)
+
+            # Extract request ID from any chunk that has it
+            if self._request_id is None:
+                self._request_id = _extract_request_id(chunk)
+
+            # Check for completed event with usage
+            if hasattr(chunk, "type"):
+                chunk_type = chunk.type
+                if chunk_type in ("response.completed", "message_stop"):
+                    response = getattr(chunk, "response", chunk)
+                    if hasattr(response, "usage"):
+                        self._final_usage = normalize_usage(response.usage)
+                    if self._options.track_tool_calls:
+                        self._tool_calls.extend(_extract_tool_calls(response))
+
+                # Track tool call events during streaming
+                if self._options.track_tool_calls:
+                    if chunk_type == "response.function_call_arguments.done":
+                        self._tool_calls.append(
+                            ToolCallMetric(type="function", name=getattr(chunk, "name", None))
+                        )
+
+            return chunk
+
+        except StopIteration:
+            if not self._done:
+                self._done = True
+                self._emit_final_metric()
+            raise
+        except Exception as e:
+            # Stream error - emit partial metrics before re-raising
+            if not self._done:
+                self._done = True
+                self._error = str(e)
+                self._emit_final_metric()
+            raise
+
+    def _emit_final_metric(self) -> None:
+        """Emit the final metric when stream ends (normally or with error)."""
+        event = _create_metric_event(
+            self._req_meta,
+            self._request_id,
+            (time.time() - self._t0) * 1000,
+            self._final_usage,
+            self._tool_calls if self._tool_calls else None,
+            error=self._error,
+        )
+        _emit_metric_sync(event, self._options)
 
 
 def _wrap_async_create(original_fn: Any, options: MeterOptions) -> Any:
@@ -382,8 +512,11 @@ def _wrap_sync_create(original_fn: Any, options: MeterOptions) -> Any:
         try:
             result = original_fn(*args, **kwargs)
 
-            # For sync streaming, we can't easily wrap the iterator
-            # Just emit what we have
+            # Handle streaming responses - wrap iterator for proper metering
+            if params.get("stream") and hasattr(result, "__iter__"):
+                return MeteredSyncStream(iter(result), req_meta, t0, options)
+
+            # Non-streaming response
             event = _create_metric_event(
                 req_meta,
                 _extract_request_id(result),
