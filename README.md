@@ -1,92 +1,135 @@
-# OpenAI Meter (Python)
+# Aden
 
-SDK metering for AI Cost ERP - usage tracking, budget enforcement, and cost control for OpenAI API calls.
+**LLM Observability & Cost Control SDK (Python)**
 
-Designed for integration with LiveKit voice agents and other OpenAI SDK consumers.
+Aden automatically tracks every LLM API call in your application—usage, latency, costs—and gives you real-time controls to prevent budget overruns. Works with OpenAI, Anthropic, and Google Gemini.
+
+```python
+from aden import instrument, MeterOptions, create_console_emitter
+from openai import OpenAI
+
+# One line to start tracking everything
+instrument(MeterOptions(emit_metric=create_console_emitter()))
+
+# Use your SDK normally - metrics collected automatically
+client = OpenAI()
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+```
+
+---
+
+## Table of Contents
+
+- [Why Aden?](#why-aden)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Sending Metrics to Your Backend](#sending-metrics-to-your-backend)
+- [Cost Control](#cost-control)
+- [Multi-Provider Support](#multi-provider-support)
+- [What Metrics Are Collected?](#what-metrics-are-collected)
+- [Metric Emitters](#metric-emitters)
+- [Advanced Configuration](#advanced-configuration)
+- [API Reference](#api-reference)
+- [Examples](#examples)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Why Aden?
+
+Building with LLMs is expensive and unpredictable:
+
+- **No visibility**: You don't know which features or users consume the most tokens
+- **Runaway costs**: One bug or bad prompt can blow through your budget in minutes
+- **No control**: Once a request is sent, you can't stop it
+
+Aden solves these problems:
+
+| Problem | Aden Solution |
+|---------|---------------|
+| No visibility into LLM usage | Automatic metric collection for every API call |
+| Unpredictable costs | Real-time budget tracking and enforcement |
+| No per-user limits | Context-based controls (per user, per feature, per tenant) |
+| Expensive models used unnecessarily | Automatic model degradation when approaching limits |
+
+---
 
 ## Installation
 
 ```bash
-pip install openai-meter
-
-# With LiveKit support
-pip install openai-meter[livekit]
+pip install aden
 ```
+
+Install with specific provider support:
+
+```bash
+# Individual providers
+pip install aden[openai]      # OpenAI/GPT models
+pip install aden[anthropic]   # Anthropic/Claude models
+pip install aden[gemini]      # Google Gemini models
+
+# All providers
+pip install aden[all]
+
+# Framework support
+pip install aden[pydantic-ai]  # PydanticAI integration
+pip install aden[livekit]      # LiveKit voice agents
+```
+
+---
 
 ## Quick Start
 
+### Step 1: Add Instrumentation
+
+Add this **once** at your application startup (before creating any LLM clients):
+
+```python
+from aden import instrument, MeterOptions, create_console_emitter
+
+instrument(MeterOptions(
+    emit_metric=create_console_emitter(pretty=True),
+))
+```
+
+### Step 2: Use Your SDK Normally
+
+That's it! Every API call is now tracked:
+
 ```python
 from openai import OpenAI
-from openai_meter import make_metered_openai, MeterOptions, create_console_emitter
 
-# Create an OpenAI client
 client = OpenAI()
 
-# Wrap with metering
-metered = make_metered_openai(client, MeterOptions(
-    emit_metric=create_console_emitter(),
-))
-
-# Use normally - metrics are collected automatically
-response = metered.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": "Hello!"}],
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Explain quantum computing"}],
 )
 
-# Output:
-# + [a1b2c3d4] gpt-4o-mini 245ms
-#   tokens: 12 in / 8 out
+# Console output:
+# + [a1b2c3d4] openai gpt-4o 1234ms
+#   tokens: 12 in / 247 out
 ```
 
-## Features
-
-### Core Metering
-
-- **Zero SDK Modification**: Monkey-patches the OpenAI client without modifying the SDK
-- **Streaming Support**: Full support for streaming responses with accurate token counting
-- **Async/Sync**: Works with both `OpenAI` and `AsyncOpenAI` clients
-- **Usage Normalization**: Handles both Responses API and Chat Completions API shapes
-
-### Budget Enforcement
+### Step 3: Clean Up on Shutdown
 
 ```python
-from openai_meter import MeterOptions, BeforeRequestResult
+from aden import uninstrument
 
-def budget_check(params, context):
-    remaining_budget = get_remaining_budget(context.metadata["tenant_id"])
-    if remaining_budget <= 0:
-        return BeforeRequestResult.cancel("Budget exceeded")
-    if remaining_budget < 10:
-        return BeforeRequestResult.throttle(delay_ms=2000)
-    return BeforeRequestResult.proceed()
-
-metered = make_metered_openai(client, MeterOptions(
-    emit_metric=my_emitter,
-    before_request=budget_check,
-    request_metadata={"tenant_id": "acme-corp"},
-))
+# In your shutdown handler
+uninstrument()
 ```
 
-### Emitters
+---
 
-```python
-from openai_meter import (
-    create_console_emitter,      # Development/debugging
-    create_batch_emitter,        # Batch for efficiency
-    create_multi_emitter,        # Multiple destinations
-    create_filtered_emitter,     # Filter events
-    create_memory_emitter,       # Testing
-    create_noop_emitter,         # Disable metrics
-)
+## Sending Metrics to Your Backend
 
-# Send to multiple destinations
-emitter = create_multi_emitter([
-    create_console_emitter(),
-    create_batch_emitter(lambda events: send_to_backend(events)),
-])
-```
+For production, send metrics to your backend instead of the console:
 
-### Custom Emitter
+### Option A: Custom Handler
 
 ```python
 import httpx
@@ -94,7 +137,7 @@ import httpx
 async def http_emitter(event):
     async with httpx.AsyncClient() as client:
         await client.post(
-            "https://api.yourerp.com/v1/ingest",
+            "https://api.yourcompany.com/v1/metrics",
             json={
                 "trace_id": event.trace_id,
                 "model": event.model,
@@ -105,115 +148,473 @@ async def http_emitter(event):
             },
             headers={"Authorization": f"Bearer {API_KEY}"},
         )
+
+instrument(MeterOptions(emit_metric=http_emitter))
 ```
 
-## LiveKit Integration
+### Option B: Aden Control Server
 
-For voice agents using LiveKit with OpenAI:
+For real-time cost control (budgets, throttling, model degradation), connect to an Aden control server:
 
 ```python
-from livekit.agents import JobContext
-from livekit.plugins import openai as lk_openai
-from openai_meter.livekit import create_livekit_meter, create_console_emitter
+import os
+from aden import instrument, MeterOptions
 
-# Create meter with session budget
-meter = create_livekit_meter(
-    emit_metric=create_console_emitter(),
-    max_cost_per_session=0.50,  # 50 cents max per session
-)
-
-async def entrypoint(ctx: JobContext):
-    # Start session tracking
-    meter.start_session(ctx.room.name)
-
-    # Get the underlying OpenAI client from LiveKit's LLM
-    llm = lk_openai.LLM()
-
-    # If you have direct access to the OpenAI client:
-    # metered_client = meter.meter_openai_client(openai_client, session_id=ctx.room.name)
-
-    # ... use the LLM in your agent
-
-    # End session and get final metrics
-    final_metrics = meter.end_session(ctx.room.name)
-    print(f"Session cost: ${final_metrics.estimated_cost_usd:.4f}")
+instrument(MeterOptions(
+    api_key=os.environ["ADEN_API_KEY"],
+    server_url=os.environ.get("ADEN_API_URL"),
+))
 ```
 
-### Session Metrics
+This enables all the [Cost Control](#cost-control) features described below.
 
-The LiveKit integration tracks per-session metrics:
+---
 
-- Total tokens (input, output, reasoning, cached)
-- Request counts by type (LLM, TTS, STT)
-- Latency breakdown
-- Estimated cost
-- Error count
+## Cost Control
 
-## Types
+Aden's cost control system lets you set budgets, throttle requests, and automatically downgrade to cheaper models—all in real-time.
 
-### MetricEvent
+### Control Actions
+
+The control server can apply these actions to requests:
+
+| Action | What It Does | Use Case |
+|--------|--------------|----------|
+| **allow** | Request proceeds normally | Default when within limits |
+| **block** | Request is rejected with an error | Budget exhausted |
+| **throttle** | Request is delayed before proceeding | Rate limiting |
+| **degrade** | Request uses a cheaper model | Approaching budget limit |
+| **alert** | Request proceeds, notification sent | Warning threshold reached |
+
+### Local Cost Control (No Server)
+
+For local development or testing, see the `cost_control_local.py` example which demonstrates implementing a policy engine locally. This pattern is useful for:
+
+- Understanding how cost control decisions work
+- Testing policy configurations before deploying a server
+- Simple use cases that don't need a full control server
+
+```python
+# See examples/cost_control_local.py for a complete example
+# that implements budget limits, throttling, and model degradation
+# without requiring a control server.
+```
+
+### Control Server
+
+For production cost control, connect to an Aden control server:
+
+```python
+from aden import instrument, MeterOptions, create_control_agent, ControlAgentOptions
+
+agent = create_control_agent(ControlAgentOptions(
+    server_url="https://your-control-server.com",
+    api_key="your-api-key",
+    on_alert=lambda alert: print(f"[{alert.level}] {alert.message}"),
+))
+
+instrument(MeterOptions(
+    control_agent=agent,
+))
+```
+
+---
+
+## Multi-Provider Support
+
+Aden works with all major LLM providers. Instrumentation automatically detects available SDKs:
+
+```python
+from aden import instrument, MeterOptions, create_console_emitter
+
+# Instrument all available providers at once
+result = instrument(MeterOptions(
+    emit_metric=create_console_emitter(pretty=True),
+))
+
+print(f"OpenAI: {result.openai}")
+print(f"Anthropic: {result.anthropic}")
+print(f"Gemini: {result.gemini}")
+```
+
+### OpenAI
+
+```python
+from openai import OpenAI
+
+client = OpenAI()
+
+# Chat completions
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+
+# Streaming
+stream = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Tell me a story"}],
+    stream=True,
+)
+
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")
+# Metrics emitted when stream completes
+```
+
+### Anthropic
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic()
+
+response = client.messages.create(
+    model="claude-3-5-sonnet-latest",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+### Google Gemini
+
+```python
+import google.generativeai as genai
+
+genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+
+model = genai.GenerativeModel("gemini-2.0-flash")
+response = model.generate_content("Explain quantum computing")
+```
+
+---
+
+## What Metrics Are Collected?
+
+Every LLM API call generates a `MetricEvent`:
 
 ```python
 @dataclass
 class MetricEvent:
-    trace_id: str              # Unique trace ID
-    model: str                 # Model used
-    stream: bool               # Whether streaming
-    request_id: str | None     # OpenAI request ID
-    latency_ms: float          # Request latency
+    # Identity
+    trace_id: str           # Unique ID for this request
+    span_id: str            # Span ID (OTel compatible)
+    request_id: str | None  # Provider's request ID
+
+    # Request details
+    provider: str           # "openai", "anthropic", "gemini"
+    model: str              # e.g., "gpt-4o", "claude-3-5-sonnet"
+    stream: bool
+    timestamp: str          # ISO timestamp
+
+    # Performance
+    latency_ms: float
+    error: str | None
+
+    # Token usage
     usage: NormalizedUsage | None
-    error: str | None          # Error message if failed
+    # - input_tokens: int
+    # - output_tokens: int
+    # - total_tokens: int
+    # - reasoning_tokens: int   # For o1/o3 models
+    # - cached_tokens: int      # Prompt cache hits
+
+    # Tool usage
     tool_calls: list[ToolCallMetric] | None
-    metadata: dict | None      # Custom metadata
+
+    # Custom metadata
+    metadata: dict | None
 ```
 
-### NormalizedUsage
+---
+
+## Metric Emitters
+
+Emitters determine where metrics go. You can use built-in emitters or create custom ones.
+
+### Built-in Emitters
 
 ```python
-@dataclass
-class NormalizedUsage:
-    input_tokens: int
-    output_tokens: int
-    total_tokens: int
-    reasoning_tokens: int      # For o1/o3 models
-    cached_tokens: int
-    accepted_prediction_tokens: int
-    rejected_prediction_tokens: int
-```
-
-## Performance
-
-The metering layer adds minimal overhead:
-
-- **Metering overhead**: ~10-50μs per request
-- **API latency**: ~500-10,000ms per request
-- **Relative overhead**: 0.0001% - 0.01%
-
-Performance options:
-
-```python
-MeterOptions(
-    emit_metric=my_emitter,
-    async_emit=True,      # Fire-and-forget (default)
-    sample_rate=0.1,      # Only meter 10% of requests
+from aden import (
+    create_console_emitter,     # Log to console (development)
+    create_batch_emitter,       # Batch before sending
+    create_multi_emitter,       # Send to multiple destinations
+    create_filtered_emitter,    # Filter events
+    create_transform_emitter,   # Transform events
+    create_file_emitter,        # Write to JSON files
+    create_memory_emitter,      # Store in memory (testing)
+    create_noop_emitter,        # Discard all events
 )
 ```
 
-## Development
+### Console Emitter (Development)
 
-```bash
-# Install dev dependencies
-pip install -e ".[dev]"
+```python
+instrument(MeterOptions(
+    emit_metric=create_console_emitter(pretty=True),
+))
 
-# Run tests
-pytest
-
-# Lint
-ruff check .
-
-# Type check
-mypy src/openai_meter
+# Output:
+# + [a1b2c3d4] openai gpt-4o 1234ms
+#   tokens: 12 in / 247 out
 ```
+
+### Multiple Destinations
+
+```python
+instrument(MeterOptions(
+    emit_metric=create_multi_emitter([
+        create_console_emitter(pretty=True),  # Log locally
+        my_backend_emitter,                    # Send to backend
+    ]),
+))
+```
+
+### Filtering Events
+
+```python
+instrument(MeterOptions(
+    emit_metric=create_filtered_emitter(
+        my_emitter,
+        lambda event: event.usage and event.usage.total_tokens > 100  # Only large requests
+    ),
+))
+```
+
+### File Logging
+
+```python
+from aden import create_file_emitter
+
+instrument(MeterOptions(
+    emit_metric=create_file_emitter(log_dir="./logs"),
+))
+# Creates: ./logs/metrics-2024-01-15.jsonl
+```
+
+### Custom Emitter
+
+```python
+def my_emitter(event):
+    # Store in your database
+    db.llm_metrics.insert({
+        "trace_id": event.trace_id,
+        "model": event.model,
+        "tokens": event.usage.total_tokens if event.usage else 0,
+        "latency_ms": event.latency_ms,
+    })
+
+    # Check for anomalies
+    if event.latency_ms > 30000:
+        alert_ops(f"Slow LLM call: {event.latency_ms}ms")
+
+instrument(MeterOptions(emit_metric=my_emitter))
+```
+
+---
+
+## Advanced Configuration
+
+### Full Options Reference
+
+```python
+instrument(MeterOptions(
+    # === Metrics Destination ===
+    emit_metric=my_emitter,           # Required unless api_key is set
+
+    # === Control Server (enables cost control) ===
+    api_key="aden_xxx",               # Your Aden API key
+    server_url="https://...",         # Control server URL (optional)
+
+    # === Context Tracking ===
+    get_context_id=lambda: get_user_id(),  # For per-user budgets
+    request_metadata={"env": "prod"},      # Custom metadata
+
+    # === Pre-request Hook ===
+    before_request=my_budget_checker,
+
+    # === Local Control Agent ===
+    control_agent=my_control_agent,
+))
+```
+
+### beforeRequest Hook
+
+Implement custom rate limiting or request modification:
+
+```python
+from aden import BeforeRequestResult
+
+def budget_check(params, context):
+    # Check your own rate limits
+    if not check_rate_limit(context.metadata.get("user_id")):
+        return BeforeRequestResult.cancel("Rate limit exceeded")
+
+    # Optionally delay the request
+    if should_throttle():
+        return BeforeRequestResult.throttle(delay_ms=1000)
+
+    # Optionally switch to a cheaper model
+    if should_degrade():
+        return BeforeRequestResult.degrade(
+            to_model="gpt-4o-mini",
+            reason="High load"
+        )
+
+    return BeforeRequestResult.proceed()
+
+instrument(MeterOptions(
+    emit_metric=my_emitter,
+    before_request=budget_check,
+    request_metadata={"user_id": get_current_user_id()},
+))
+```
+
+### Legacy Per-Instance Wrapping
+
+For backward compatibility, you can still wrap individual clients:
+
+```python
+from aden import make_metered_openai, MeterOptions
+from openai import OpenAI
+
+client = OpenAI()
+metered = make_metered_openai(client, MeterOptions(
+    emit_metric=my_emitter,
+))
+```
+
+---
+
+## API Reference
+
+### Core Functions
+
+| Function | Description |
+|----------|-------------|
+| `instrument(options)` | Instrument all available LLM SDKs globally |
+| `uninstrument()` | Remove instrumentation |
+| `is_instrumented()` | Check if instrumented |
+| `get_instrumented_sdks()` | Get which SDKs are instrumented |
+
+### Provider-Specific Functions
+
+| Function | Description |
+|----------|-------------|
+| `instrument_openai(options)` | Instrument OpenAI only |
+| `instrument_anthropic(options)` | Instrument Anthropic only |
+| `instrument_gemini(options)` | Instrument Gemini only |
+| `uninstrument_openai()` | Remove OpenAI instrumentation |
+| `uninstrument_anthropic()` | Remove Anthropic instrumentation |
+| `uninstrument_gemini()` | Remove Gemini instrumentation |
+
+### Emitter Factories
+
+| Function | Description |
+|----------|-------------|
+| `create_console_emitter(pretty=False)` | Log to console |
+| `create_batch_emitter(handler, batch_size, flush_interval)` | Batch events |
+| `create_multi_emitter(emitters)` | Multiple destinations |
+| `create_filtered_emitter(emitter, filter_fn)` | Filter events |
+| `create_transform_emitter(emitter, transform_fn)` | Transform events |
+| `create_file_emitter(log_dir)` | Write to JSON files |
+| `create_memory_emitter()` | Store in memory |
+| `create_noop_emitter()` | Discard events |
+
+### Control Agent
+
+| Function | Description |
+|----------|-------------|
+| `create_control_agent(options)` | Create local control agent |
+| `create_control_agent_emitter(agent)` | Create emitter from agent |
+
+### Types
+
+```python
+from aden import (
+    MetricEvent,
+    MeterOptions,
+    NormalizedUsage,
+    ToolCallMetric,
+    BeforeRequestResult,
+    BeforeRequestContext,
+    ControlPolicy,
+    ControlDecision,
+    AlertEvent,
+    RequestCancelledError,
+    BudgetExceededError,
+)
+```
+
+---
+
+## Examples
+
+Run examples with `python examples/<name>.py`:
+
+| Example | Description |
+|---------|-------------|
+| `openai_basic.py` | Basic OpenAI instrumentation |
+| `anthropic_basic.py` | Basic Anthropic instrumentation |
+| `gemini_basic.py` | Basic Gemini instrumentation |
+| `cost_control_local.py` | Cost control without a server |
+| `pydantic_ai_example.py` | PydanticAI framework integration |
+
+---
+
+## Troubleshooting
+
+### Metrics not appearing
+
+1. **Check instrumentation order**: Call `instrument()` before creating SDK clients
+   ```python
+   # Correct
+   instrument(MeterOptions(...))
+   client = OpenAI()
+
+   # Wrong - client created before instrumentation
+   client = OpenAI()
+   instrument(MeterOptions(...))
+   ```
+
+2. **Check SDK is installed**: Aden only instruments SDKs that are importable
+   ```bash
+   pip install openai anthropic google-generativeai
+   ```
+
+3. **Verify emitter is working**: Test with console emitter first
+   ```python
+   instrument(MeterOptions(
+       emit_metric=create_console_emitter(pretty=True),
+   ))
+   ```
+
+### Budget not enforcing
+
+1. **Check control agent is connected**: Budget enforcement requires a control agent connected to your server
+   ```python
+   agent = create_control_agent(ControlAgentOptions(
+       server_url="https://your-server.com",
+       api_key="your-api-key",
+   ))
+   instrument(MeterOptions(
+       control_agent=agent,  # Required!
+   ))
+   ```
+
+2. **Verify server policy is configured**: Check your control server has the budget configured for your context
+
+### Streaming not tracked
+
+1. **Consume the stream**: Metrics are emitted when the stream completes
+   ```python
+   stream = client.chat.completions.create(..., stream=True)
+   for chunk in stream:  # Must iterate through stream
+       print(chunk.choices[0].delta.content or "", end="")
+   # Metrics emitted here
+   ```
+
+---
 
 ## License
 

@@ -11,10 +11,11 @@ import random
 import time
 from datetime import datetime
 from functools import wraps
-from typing import Any, AsyncIterator, Iterator, TypeVar
+from typing import TYPE_CHECKING, Any, AsyncIterator, Iterator, TypeVar
 from uuid import uuid4
 
-from openai import AsyncOpenAI, OpenAI
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI, OpenAI
 
 from .normalize import normalize_usage
 from .types import (
@@ -542,15 +543,23 @@ def _wrap_sync_create(original_fn: Any, options: MeterOptions) -> Any:
     return wrapper
 
 
-# Type alias for metered clients
-MeteredOpenAI = OpenAI
-MeteredAsyncOpenAI = AsyncOpenAI
+# Type alias for metered clients (resolved at runtime only if openai is installed)
+MeteredOpenAI: Any = None
+MeteredAsyncOpenAI: Any = None
+
+try:
+    from openai import AsyncOpenAI as _AsyncOpenAI
+    from openai import OpenAI as _OpenAI
+    MeteredOpenAI = _OpenAI
+    MeteredAsyncOpenAI = _AsyncOpenAI
+except ImportError:
+    pass
 
 
 def make_metered_openai(
-    client: OpenAI | AsyncOpenAI,
+    client: "OpenAI | AsyncOpenAI",
     options: MeterOptions,
-) -> OpenAI | AsyncOpenAI:
+) -> "OpenAI | AsyncOpenAI":
     """
     Wraps an OpenAI client with metering capabilities.
 
@@ -582,7 +591,8 @@ def make_metered_openai(
         )
         ```
     """
-    is_async = isinstance(client, AsyncOpenAI)
+    # Check if client is async - use the imported class if available
+    is_async = MeteredAsyncOpenAI is not None and isinstance(client, MeteredAsyncOpenAI)
     wrap_fn = _wrap_async_create if is_async else _wrap_sync_create
 
     # Wrap chat.completions.create
@@ -602,7 +612,7 @@ def make_metered_openai(
     return client
 
 
-def is_metered(client: OpenAI | AsyncOpenAI) -> bool:
+def is_metered(client: "OpenAI | AsyncOpenAI") -> bool:
     """
     Check if a client has already been wrapped with metering.
 

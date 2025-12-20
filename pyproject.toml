@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "openai-meter"
-version = "0.1.0"
-description = "OpenAI SDK metering for AI Cost ERP - usage tracking, budget enforcement, and cost control"
+name = "aden"
+version = "0.2.0"
+description = "Multi-provider LLM SDK metering - OpenAI, Anthropic, Gemini - usage tracking, budget enforcement, and cost control"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Aden", email = "aden@example.com" }
 ]
-keywords = ["openai", "metering", "cost", "usage", "billing", "erp", "livekit"]
+keywords = ["openai", "anthropic", "gemini", "llm", "metering", "cost", "usage", "billing", "erp", "livekit"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -24,16 +24,41 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
-dependencies = [
+# No required dependencies - all providers are optional
+dependencies = []
+
+[project.optional-dependencies]
+# Individual provider support
+openai = [
     "openai>=1.0.0",
     "tiktoken>=0.5.0",
 ]
-
-[project.optional-dependencies]
+anthropic = [
+    "anthropic>=0.20.0",
+]
+gemini = [
+    "google-generativeai>=0.4.0",
+]
+# All providers
+all = [
+    "openai>=1.0.0",
+    "tiktoken>=0.5.0",
+    "anthropic>=0.20.0",
+    "google-generativeai>=0.4.0",
+]
+# PydanticAI framework
+pydantic-ai = [
+    "pydantic-ai>=0.0.1",
+    "openai>=1.0.0",
+]
+# LiveKit integration (requires OpenAI)
 livekit = [
+    "openai>=1.0.0",
+    "tiktoken>=0.5.0",
     "livekit-agents>=0.8.0",
     "livekit-plugins-openai>=0.8.0",
 ]
+# Database backends
 timescale = [
     "asyncpg>=0.29.0",
 ]
@@ -48,12 +73,12 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/aden/openai-meter-py"
-Documentation = "https://github.com/aden/openai-meter-py#readme"
-Repository = "https://github.com/aden/openai-meter-py"
+Homepage = "https://github.com/aden/aden-py"
+Documentation = "https://github.com/aden/aden-py#readme"
+Repository = "https://github.com/aden/aden-py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/openai_meter"]
+packages = ["src/aden"]
 
 [tool.ruff]
 line-length = 100

@@ -1,14 +1,32 @@
 """
-Type definitions for OpenAI Meter.
+Type definitions for Aden SDK.
 
 These types mirror the TypeScript definitions and provide a consistent
-interface for metering OpenAI API calls.
+interface for metering LLM API calls across multiple providers
+(OpenAI, Anthropic, Gemini).
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Awaitable, Callable, Literal, Protocol, TypedDict
+
+# Provider type
+Provider = Literal["openai", "anthropic", "gemini"]
+
+# Default control server URL
+DEFAULT_CONTROL_SERVER = "https://kube.acho.io"
+
+
+def get_control_server_url(server_url: str | None = None) -> str:
+    """
+    Get the control server URL with priority:
+    1. Explicit server_url option
+    2. ADEN_API_URL environment variable
+    3. DEFAULT_CONTROL_SERVER constant
+    """
+    import os
+    return server_url or os.environ.get("ADEN_API_URL") or DEFAULT_CONTROL_SERVER
 
 
 @dataclass
@@ -104,16 +122,27 @@ class RequestMetadata:
 class MetricEvent:
     """Complete metric event emitted after each API call."""
 
-    # From RequestMetadata
+    # Identity fields (OTel-compatible)
     trace_id: str
-    """Unique trace ID for this request."""
+    """Unique trace ID for grouping related operations."""
 
-    model: str
+    span_id: str = ""
+    """Unique span ID for this operation (OTel-compatible)."""
+
+    parent_span_id: str | None = None
+    """Parent span ID for nested calls (OTel-compatible)."""
+
+    # Provider info
+    provider: Provider = "openai"
+    """LLM provider (openai, anthropic, gemini)."""
+
+    model: str = ""
     """Model used for the request."""
 
     stream: bool = False
     """Whether streaming was enabled."""
 
+    # OpenAI-specific fields (may be None for other providers)
     service_tier: str | None = None
     """Service tier (affects pricing/performance)."""
 
@@ -131,7 +160,7 @@ class MetricEvent:
 
     # MetricEvent specific fields
     request_id: str | None = None
-    """OpenAI request ID for correlation."""
+    """Provider request ID for correlation."""
 
     latency_ms: float = 0
     """Request latency in milliseconds."""
@@ -181,6 +210,8 @@ class BeforeRequestAction(str, Enum):
     PROCEED = "proceed"
     THROTTLE = "throttle"
     CANCEL = "cancel"
+    DEGRADE = "degrade"
+    ALERT = "alert"
 
 
 @dataclass
@@ -191,10 +222,19 @@ class BeforeRequestResult:
     """The action to take."""
 
     delay_ms: int = 0
-    """Delay in milliseconds (for throttle action)."""
+    """Delay in milliseconds (for throttle action, or combined with degrade/alert)."""
 
     reason: str = ""
-    """Reason for the action (for cancel action)."""
+    """Reason for the action (for cancel/degrade actions)."""
+
+    to_model: str = ""
+    """Model to degrade to (for degrade action)."""
+
+    level: Literal["info", "warning", "critical"] = "warning"
+    """Alert level (for alert action)."""
+
+    message: str = ""
+    """Alert message (for alert action)."""
 
     @classmethod
     def proceed(cls) -> "BeforeRequestResult":
@@ -210,6 +250,18 @@ class BeforeRequestResult:
     def cancel(cls, reason: str) -> "BeforeRequestResult":
         """Create a cancel result."""
         return cls(action=BeforeRequestAction.CANCEL, reason=reason)
+
+    @classmethod
+    def degrade(cls, to_model: str, reason: str = "", delay_ms: int = 0) -> "BeforeRequestResult":
+        """Create a degrade result to switch to a cheaper model."""
+        return cls(action=BeforeRequestAction.DEGRADE, to_model=to_model, reason=reason, delay_ms=delay_ms)
+
+    @classmethod
+    def alert(
+        cls, message: str, level: Literal["info", "warning", "critical"] = "warning", delay_ms: int = 0
+    ) -> "BeforeRequestResult":
+        """Create an alert result (proceeds but triggers notification)."""
+        return cls(action=BeforeRequestAction.ALERT, message=message, level=level, delay_ms=delay_ms)
 
 
 # Type aliases for callbacks
@@ -227,10 +279,62 @@ BeforeRequestHook = Callable[
 EmitErrorHandler = Callable[["MetricEvent", Exception], None]
 """Callback when metric emission fails."""
 
+# Alert callback type
+AlertHandler = Callable[
+    [dict[str, Any]],  # AlertEvent-like dict with level, message, provider, model, etc.
+    None | Awaitable[None],
+]
+"""Callback when an alert is triggered."""
+
+
+@dataclass
+class SDKClasses:
+    """
+    SDK classes that can be passed for instrumentation.
+
+    When provided, these classes are used instead of auto-importing.
+    This ensures the correct SDK instances are patched, especially
+    when multiple versions or custom wrappers are in use.
+
+    Example:
+        ```python
+        from openai import OpenAI, AsyncOpenAI
+        from anthropic import Anthropic, AsyncAnthropic
+
+        await instrument(MeterOptions(
+            emit_metric=create_console_emitter(),
+            sdks=SDKClasses(
+                OpenAI=OpenAI,
+                AsyncOpenAI=AsyncOpenAI,
+                Anthropic=Anthropic,
+                AsyncAnthropic=AsyncAnthropic,
+            ),
+        ))
+        ```
+    """
+
+    # OpenAI SDK classes
+    OpenAI: Any | None = None
+    """The OpenAI client class."""
+
+    AsyncOpenAI: Any | None = None
+    """The AsyncOpenAI client class."""
+
+    # Anthropic SDK classes
+    Anthropic: Any | None = None
+    """The Anthropic client class."""
+
+    AsyncAnthropic: Any | None = None
+    """The AsyncAnthropic client class."""
+
+    # Google Generative AI (Gemini) SDK classes
+    GenerativeModel: Any | None = None
+    """The google.generativeai.GenerativeModel class."""
+
 
 @dataclass
 class MeterOptions:
-    """Options for the metered OpenAI client."""
+    """Options for the metered LLM client."""
 
     emit_metric: MetricEmitter
     """Custom metric emitter function."""
@@ -241,11 +345,18 @@ class MeterOptions:
     generate_trace_id: Callable[[], str] | None = None
     """Custom trace ID generator (default: uuid4)."""
 
+    generate_span_id: Callable[[], str] | None = None
+    """Custom span ID generator (default: uuid4)."""
+
     before_request: BeforeRequestHook | None = None
     """Hook called before each request for user-defined rate limiting."""
 
     request_metadata: dict[str, Any] | None = None
     """Custom metadata to pass to beforeRequest hook."""
+
+    # SDK injection
+    sdks: SDKClasses | None = None
+    """SDK classes to instrument. If not provided, auto-imports are attempted."""
 
     # Performance options
     async_emit: bool = False
@@ -262,8 +373,49 @@ class MeterOptions:
     on_emit_error: EmitErrorHandler | None = None
     """Callback when metric emission fails. Receives the event and exception.
 
-    If not set, errors are logged to the 'openai_meter' logger.
+    If not set, errors are logged to the 'aden' logger.
     Use this to implement custom error handling, alerting, or fallback storage.
+    """
+
+    on_alert: AlertHandler | None = None
+    """Callback when an alert is triggered by the control agent.
+
+    Alerts do NOT block requests - they are notifications only.
+    Use this for logging, notifications, or monitoring.
+    """
+
+    # Context ID for control agent
+    get_context_id: Callable[[], str | None] | None = None
+    """Function to get current context ID (user ID, session ID, etc.)."""
+
+    # Control Agent options
+    api_key: str | None = None
+    """API key for the control server.
+
+    When provided, automatically creates a control agent and emitter.
+    If not provided, checks ADEN_API_KEY environment variable.
+
+    Example:
+        ```python
+        await instrument(MeterOptions(
+            api_key=os.environ.get("ADEN_API_KEY"),
+            emit_metric=create_console_emitter(),
+        ))
+        ```
+    """
+
+    server_url: str | None = None
+    """Control server URL.
+
+    Priority: server_url option > ADEN_API_URL env var > https://kube.acho.io
+    Only used when api_key is provided.
+    """
+
+    fail_open: bool = True
+    """Whether to allow requests when control server is unreachable.
+
+    Default: True (fail open - requests proceed if server is down)
+    Set to False for strict control (fail closed - block if server unreachable)
     """
 
 
@@ -325,3 +477,27 @@ class BudgetExceededError(Exception):
         self.estimated_input_tokens = info.estimated_input_tokens
         self.max_input_tokens = info.max_input_tokens
         self.model = info.model
+
+
+@dataclass
+class InstrumentationResult:
+    """Result of calling instrument() - shows which SDKs were instrumented."""
+
+    openai: bool = False
+    """Whether OpenAI SDK was instrumented."""
+
+    anthropic: bool = False
+    """Whether Anthropic SDK was instrumented."""
+
+    gemini: bool = False
+    """Whether Google Gemini SDK was instrumented."""
+
+    def __str__(self) -> str:
+        instrumented = [name for name, success in [
+            ("openai", self.openai),
+            ("anthropic", self.anthropic),
+            ("gemini", self.gemini),
+        ] if success]
+        if instrumented:
+            return f"Instrumented: {', '.join(instrumented)}"
+        return "No SDKs instrumented"
