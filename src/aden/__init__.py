@@ -58,6 +58,11 @@ from .instrument_gemini import (
     uninstrument_gemini,
     is_gemini_instrumented,
 )
+from .instrument_genai import (
+    instrument_genai,
+    uninstrument_genai,
+    is_genai_instrumented,
+)
 
 # Control Agent
 from .control_types import (
@@ -146,6 +151,9 @@ __all__ = [
     "instrument_gemini",
     "uninstrument_gemini",
     "is_gemini_instrumented",
+    "instrument_genai",
+    "uninstrument_genai",
+    "is_genai_instrumented",
     # Control Agent
     "ControlAction",
     "ControlDecision",

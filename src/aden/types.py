@@ -6,10 +6,10 @@ interface for metering LLM API calls across multiple providers
 (OpenAI, Anthropic, Gemini).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Awaitable, Callable, Literal, Protocol, TypedDict
+from typing import Any, Awaitable, Callable, Literal
 
 # Provider type
 Provider = Literal["openai", "anthropic", "gemini"]
@@ -120,21 +120,29 @@ class RequestMetadata:
 
 @dataclass
 class MetricEvent:
-    """Complete metric event emitted after each API call."""
+    """
+    Complete metric event emitted after each API call.
 
-    # Identity fields (OTel-compatible)
+    All fields are flat (not nested) for consistent cross-provider analytics.
+    Uses OpenTelemetry-compatible naming: trace_id groups operations,
+    span_id identifies each operation.
+    """
+
+    # === Identity (OTel-compatible) ===
     trace_id: str
-    """Unique trace ID for grouping related operations."""
+    """Trace ID grouping related operations (OTel standard)."""
 
     span_id: str = ""
-    """Unique span ID for this operation (OTel-compatible)."""
+    """Unique span ID for this specific operation (OTel standard)."""
 
     parent_span_id: str | None = None
-    """Parent span ID for nested calls (OTel-compatible)."""
+    """Parent span ID for nested/hierarchical calls (OTel standard)."""
 
-    # Provider info
+    request_id: str | None = None
+    """Provider-specific request ID (if available)."""
+
     provider: Provider = "openai"
-    """LLM provider (openai, anthropic, gemini)."""
+    """LLM provider: openai, gemini, anthropic."""
 
     model: str = ""
     """Model used for the request."""
@@ -142,31 +150,12 @@ class MetricEvent:
     stream: bool = False
     """Whether streaming was enabled."""
 
-    # OpenAI-specific fields (may be None for other providers)
-    service_tier: str | None = None
-    """Service tier (affects pricing/performance)."""
+    timestamp: str = ""
+    """ISO timestamp when the request started."""
 
-    max_output_tokens: int | None = None
-    """Maximum output tokens cap."""
-
-    max_tool_calls: int | None = None
-    """Maximum tool calls allowed."""
-
-    prompt_cache_key: str | None = None
-    """Prompt cache key for improved cache hits."""
-
-    prompt_cache_retention: str | None = None
-    """Prompt cache retention policy."""
-
-    # MetricEvent specific fields
-    request_id: str | None = None
-    """Provider request ID for correlation."""
-
+    # === Performance ===
     latency_ms: float = 0
     """Request latency in milliseconds."""
-
-    usage: NormalizedUsage | None = None
-    """Normalized usage metrics."""
 
     status_code: int | None = None
     """HTTP status code (if available)."""
@@ -174,13 +163,70 @@ class MetricEvent:
     error: str | None = None
     """Error message if request failed."""
 
-    rate_limit: RateLimitInfo | None = None
-    """Rate limit information."""
+    # === Token Usage (flat, consistent across providers) ===
+    input_tokens: int = 0
+    """Input/prompt tokens consumed."""
 
-    tool_calls: list[ToolCallMetric] | None = None
-    """Tool calls made during the request."""
+    output_tokens: int = 0
+    """Output/completion tokens consumed."""
 
-    metadata: dict[str, Any] | None = None
+    total_tokens: int = 0
+    """Total tokens (input + output)."""
+
+    cached_tokens: int = 0
+    """Tokens served from cache (reduces cost)."""
+
+    reasoning_tokens: int = 0
+    """Reasoning tokens used (for o1/o3 models)."""
+
+    # === Rate Limits (flat) ===
+    rate_limit_remaining_requests: int | None = None
+    """Remaining requests in current window."""
+
+    rate_limit_remaining_tokens: int | None = None
+    """Remaining tokens in current window."""
+
+    rate_limit_reset_requests: float | None = None
+    """Time until request limit resets (seconds)."""
+
+    rate_limit_reset_tokens: float | None = None
+    """Time until token limit resets (seconds)."""
+
+    # === Call Relationship Tracking ===
+    call_sequence: int | None = None
+    """Sequence number within the trace."""
+
+    agent_stack: list[str] | None = None
+    """Stack of agent/handler names leading to this call."""
+
+    # === Call Site (flat) ===
+    call_site_file: str | None = None
+    """File path where the call originated (immediate caller)."""
+
+    call_site_line: int | None = None
+    """Line number where the call originated."""
+
+    call_site_column: int | None = None
+    """Column number where the call originated."""
+
+    call_site_function: str | None = None
+    """Function name where the call originated."""
+
+    call_stack: list[str] | None = None
+    """Full call stack for detailed tracing (file:line:function)."""
+
+    # === Tool Usage ===
+    tool_call_count: int | None = None
+    """Number of tool calls made."""
+
+    tool_names: str | None = None
+    """Tool names that were called (comma-separated)."""
+
+    # === Provider-specific (optional) ===
+    service_tier: str | None = None
+    """Service tier (OpenAI: auto, default, flex, priority)."""
+
+    metadata: dict[str, str] | None = None
     """Custom metadata attached to the request."""
 
 
@@ -194,8 +240,11 @@ class BeforeRequestContext:
     stream: bool
     """Whether this is a streaming request."""
 
+    span_id: str
+    """Generated span ID for this request (OTel standard)."""
+
     trace_id: str
-    """Generated trace ID for this request."""
+    """Trace ID grouping related operations (OTel standard)."""
 
     timestamp: datetime
     """Timestamp when the request was initiated."""
@@ -490,13 +539,17 @@ class InstrumentationResult:
     """Whether Anthropic SDK was instrumented."""
 
     gemini: bool = False
-    """Whether Google Gemini SDK was instrumented."""
+    """Whether Google Gemini SDK (google-generativeai) was instrumented."""
+
+    genai: bool = False
+    """Whether Google GenAI SDK (google-genai) was instrumented."""
 
     def __str__(self) -> str:
         instrumented = [name for name, success in [
             ("openai", self.openai),
             ("anthropic", self.anthropic),
             ("gemini", self.gemini),
+            ("genai", self.genai),
         ] if success]
         if instrumented:
             return f"Instrumented: {', '.join(instrumented)}"

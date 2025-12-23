@@ -26,6 +26,13 @@ from typing import Any
 # Add parent directory to path for local development
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, use shell environment
+
 try:
     from pydantic import BaseModel
     from pydantic_ai import Agent, RunContext

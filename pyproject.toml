@@ -39,12 +39,21 @@ anthropic = [
 gemini = [
     "google-generativeai>=0.4.0",
 ]
+genai = [
+    "google-genai>=1.0.0",
+]
+# Google ADK (uses google-genai internally)
+adk = [
+    "google-adk>=0.1.0",
+    "google-genai>=1.0.0",
+]
 # All providers
 all = [
     "openai>=1.0.0",
     "tiktoken>=0.5.0",
     "anthropic>=0.20.0",
     "google-generativeai>=0.4.0",
+    "google-genai>=1.0.0",
 ]
 # PydanticAI framework
 pydantic-ai = [
@@ -70,6 +79,7 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.urls]

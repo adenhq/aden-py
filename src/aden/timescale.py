@@ -78,12 +78,12 @@ INSERT INTO llm_metrics (
 
 def _event_to_row(event: MetricEvent) -> tuple[Any, ...]:
     """Convert a MetricEvent to a database row tuple."""
-    usage = event.usage
-    rate_limit = event.rate_limit
-
+    # Build tool_calls JSON from flat fields
     tool_calls_json = None
-    if event.tool_calls:
-        tool_calls_json = json.dumps([asdict(tc) for tc in event.tool_calls])
+    if event.tool_names:
+        # Convert comma-separated names to array format
+        names = event.tool_names.split(",")
+        tool_calls_json = json.dumps([{"name": name} for name in names])
 
     metadata_json = None
     if event.metadata:
@@ -94,19 +94,19 @@ def _event_to_row(event: MetricEvent) -> tuple[Any, ...]:
         event.trace_id,
         event.request_id,
         event.model,
-        usage.input_tokens if usage else None,
-        usage.output_tokens if usage else None,
-        usage.total_tokens if usage else None,
-        usage.cached_tokens if usage else None,
-        usage.reasoning_tokens if usage else None,
+        event.input_tokens if event.input_tokens else None,
+        event.output_tokens if event.output_tokens else None,
+        event.total_tokens if event.total_tokens else None,
+        event.cached_tokens if event.cached_tokens else None,
+        event.reasoning_tokens if event.reasoning_tokens else None,
         event.latency_ms,
         event.stream,
         event.service_tier,
         event.error,
         tool_calls_json,
         metadata_json,
-        rate_limit.remaining_requests if rate_limit else None,
-        rate_limit.remaining_tokens if rate_limit else None,
+        event.rate_limit_remaining_requests,
+        event.rate_limit_remaining_tokens,
     )
 
 

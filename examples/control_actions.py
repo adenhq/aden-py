@@ -9,7 +9,7 @@ Demonstrates all control actions in the Aden SDK:
 5. alert    - Request proceeds but triggers notification
 
 Prerequisites:
-1. Set ADEN_API_KEY in environment
+1. Set ADEN_API_KEY in environment (or .env file)
 2. Set ADEN_API_URL to your control server (or use default)
 3. Set OPENAI_API_KEY for making actual LLM calls
 
@@ -23,12 +23,19 @@ import time
 from datetime import datetime
 from typing import Any
 
-import httpx
-
 # Add parent directory to path for local development
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from openai import OpenAI
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, use shell environment
+
+import httpx
+
+from openai import AsyncOpenAI
 
 from aden import (
     instrument_async,
@@ -143,19 +150,27 @@ async def setup_policy() -> None:
         print(json.dumps(policy, indent=2))
 
 
-async def get_budget_status() -> dict[str, float]:
-    """Get current budget status from server."""
+async def get_budget_status(debug: bool = False) -> dict[str, float]:
+    """Get current budget status from server.
+
+    Note: The server may not update 'spent' in real-time. Budget spend tracking
+    depends on server-side aggregation of metrics by context_id.
+    """
     async with httpx.AsyncClient() as client:
         res = await client.get(
             f"{SERVER_URL}/v1/control/budget/{USER_ID}",
             headers={"Authorization": f"Bearer {API_KEY}"},
         )
         data = res.json()
-        spend = data.get("current_spend_usd", 0)
+        if debug:
+            print(f"   [DEBUG] Budget response: {data}")
+        # Server returns 'spent' for current spend
+        spend = data.get("spent", 0)
+        limit = data.get("limit", BUDGET_LIMIT)
         return {
             "spend": spend,
-            "limit": BUDGET_LIMIT,
-            "percent": (spend / BUDGET_LIMIT) * 100,
+            "limit": limit,
+            "percent": (spend / limit) * 100 if limit > 0 else 0,
         }
 
 
@@ -198,7 +213,7 @@ async def main() -> None:
     )
 
     # Create client AFTER instrumentation
-    openai = OpenAI()
+    openai = AsyncOpenAI()
 
     print("\n" + "=" * 60)
     print("Making LLM requests to demonstrate control actions...")
@@ -215,7 +230,7 @@ async def main() -> None:
     ]
 
     for i, prompt in enumerate(prompts):
-        status = await get_budget_status()
+        status = await get_budget_status(debug=(i == 0))  # Debug first request
 
         print(f"\n[Request {i + 1}/{len(prompts)}] \"{prompt}\"")
         print(f"   Budget: ${status['spend']:.6f} / ${status['limit']} ({status['percent']:.1f}%)")
@@ -223,7 +238,7 @@ async def main() -> None:
         start_time = time.time()
 
         try:
-            response = openai.chat.completions.create(
+            response = await openai.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=20,

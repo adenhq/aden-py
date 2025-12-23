@@ -12,6 +12,9 @@ from functools import wraps
 from typing import Any, AsyncIterator, Callable, Iterator
 from uuid import uuid4
 
+from datetime import datetime
+
+from .call_stack import CallStackInfo, capture_call_stack
 from .normalize import normalize_anthropic_usage
 from .types import (
     BeforeRequestAction,
@@ -21,7 +24,6 @@ from .types import (
     MetricEvent,
     NormalizedUsage,
     RequestCancelledError,
-    ToolCallMetric,
 )
 
 logger = logging.getLogger("aden")
@@ -63,12 +65,16 @@ def _extract_request_id(response: Any) -> str | None:
     return None
 
 
-def _extract_tool_calls(response: Any) -> list[ToolCallMetric]:
-    """Extracts tool call metrics from Anthropic response (tool_use content blocks)."""
-    tool_calls: list[ToolCallMetric] = []
+def _extract_tool_calls(response: Any) -> tuple[int, str | None]:
+    """Extracts tool call count and names from Anthropic response (tool_use content blocks).
+
+    Returns:
+        Tuple of (tool_call_count, tool_names_comma_separated)
+    """
+    tool_names: list[str] = []
 
     if response is None:
-        return tool_calls
+        return (0, None)
 
     # Get content array
     content = None
@@ -78,21 +84,23 @@ def _extract_tool_calls(response: Any) -> list[ToolCallMetric]:
         content = response.get("content")
 
     if not isinstance(content, list):
-        return tool_calls
+        return (0, None)
 
     # Anthropic uses content array with type: "tool_use"
     for item in content:
         if isinstance(item, dict):
             if item.get("type") == "tool_use":
-                tool_calls.append(
-                    ToolCallMetric(type="function", name=item.get("name"))
-                )
+                name = item.get("name")
+                if name:
+                    tool_names.append(name)
         elif hasattr(item, "type") and item.type == "tool_use":
-            tool_calls.append(
-                ToolCallMetric(type="function", name=getattr(item, "name", None))
-            )
+            name = getattr(item, "name", None)
+            if name:
+                tool_names.append(name)
 
-    return tool_calls
+    count = len(tool_names)
+    names = ",".join(tool_names) if tool_names else None
+    return (count, names)
 
 
 def _build_metric_event(
@@ -103,23 +111,39 @@ def _build_metric_event(
     latency_ms: float,
     usage: NormalizedUsage | None,
     request_id: str | None = None,
-    tool_calls: list[ToolCallMetric] | None = None,
+    tool_call_count: int | None = None,
+    tool_names: str | None = None,
     error: str | None = None,
     metadata: dict[str, Any] | None = None,
+    stack_info: CallStackInfo | None = None,
 ) -> MetricEvent:
-    """Builds a MetricEvent for Anthropic."""
+    """Builds a MetricEvent for Anthropic with flat fields."""
     return MetricEvent(
         trace_id=trace_id,
         span_id=span_id,
         provider="anthropic",
         model=model,
         stream=stream,
+        timestamp=datetime.now().isoformat(),
         latency_ms=latency_ms,
-        usage=usage,
         request_id=request_id,
-        tool_calls=tool_calls if tool_calls else None,
         error=error,
+        # Flatten usage
+        input_tokens=usage.input_tokens if usage else 0,
+        output_tokens=usage.output_tokens if usage else 0,
+        total_tokens=usage.total_tokens if usage else 0,
+        cached_tokens=usage.cached_tokens if usage else 0,
+        reasoning_tokens=usage.reasoning_tokens if usage else 0,
+        # Flatten tool calls
+        tool_call_count=tool_call_count if tool_call_count and tool_call_count > 0 else None,
+        tool_names=tool_names,
         metadata=metadata,
+        # Call stack info
+        call_site_file=stack_info.call_site_file if stack_info else None,
+        call_site_line=stack_info.call_site_line if stack_info else None,
+        call_site_function=stack_info.call_site_function if stack_info else None,
+        call_stack=stack_info.call_stack if stack_info else None,
+        agent_stack=stack_info.agent_stack if stack_info else None,
     )
 
 
@@ -257,6 +281,7 @@ class MeteredAsyncStream:
         model: str,
         t0: float,
         options: MeterOptions,
+        stack_info: CallStackInfo | None = None,
     ):
         self._stream = stream
         self._trace_id = trace_id
@@ -264,10 +289,11 @@ class MeteredAsyncStream:
         self._model = model
         self._t0 = t0
         self._options = options
+        self._stack_info = stack_info
         self._final_usage: NormalizedUsage | None = None
         self._input_tokens: int = 0  # Track input tokens from message_start
         self._request_id: str | None = None
-        self._tool_calls: list[ToolCallMetric] = []
+        self._tool_names: list[str] = []
         self._done = False
         self._error: str | None = None
 
@@ -297,12 +323,9 @@ class MeteredAsyncStream:
                     if content_block:
                         block_type = getattr(content_block, "type", None)
                         if block_type == "tool_use":
-                            self._tool_calls.append(
-                                ToolCallMetric(
-                                    type="function",
-                                    name=getattr(content_block, "name", None),
-                                )
-                            )
+                            name = getattr(content_block, "name", None)
+                            if name:
+                                self._tool_names.append(name)
 
                 # message_delta: Contains final usage (output_tokens)
                 elif chunk_type == "message_delta":
@@ -335,6 +358,8 @@ class MeteredAsyncStream:
 
     async def _emit_final_metric(self) -> None:
         """Emit the final metric when stream ends."""
+        tool_count = len(self._tool_names) if self._tool_names else None
+        tool_names_str = ",".join(self._tool_names) if self._tool_names else None
         event = _build_metric_event(
             trace_id=self._trace_id,
             span_id=self._span_id,
@@ -343,8 +368,10 @@ class MeteredAsyncStream:
             latency_ms=(time.time() - self._t0) * 1000,
             usage=self._final_usage,
             request_id=self._request_id,
-            tool_calls=self._tool_calls if self._tool_calls else None,
+            tool_call_count=tool_count,
+            tool_names=tool_names_str,
             error=self._error,
+            stack_info=self._stack_info,
         )
         await _emit_metric(event, self._options)
 
@@ -360,6 +387,7 @@ class MeteredSyncStream:
         model: str,
         t0: float,
         options: MeterOptions,
+        stack_info: CallStackInfo | None = None,
     ):
         self._stream = stream
         self._trace_id = trace_id
@@ -367,10 +395,11 @@ class MeteredSyncStream:
         self._model = model
         self._t0 = t0
         self._options = options
+        self._stack_info = stack_info
         self._final_usage: NormalizedUsage | None = None
         self._input_tokens: int = 0
         self._request_id: str | None = None
-        self._tool_calls: list[ToolCallMetric] = []
+        self._tool_names: list[str] = []
         self._done = False
         self._error: str | None = None
 
@@ -397,12 +426,9 @@ class MeteredSyncStream:
                     if content_block:
                         block_type = getattr(content_block, "type", None)
                         if block_type == "tool_use":
-                            self._tool_calls.append(
-                                ToolCallMetric(
-                                    type="function",
-                                    name=getattr(content_block, "name", None),
-                                )
-                            )
+                            name = getattr(content_block, "name", None)
+                            if name:
+                                self._tool_names.append(name)
 
                 elif chunk_type == "message_delta":
                     usage = getattr(chunk, "usage", None)
@@ -434,6 +460,8 @@ class MeteredSyncStream:
 
     def _emit_final_metric(self) -> None:
         """Emit the final metric when stream ends."""
+        tool_count = len(self._tool_names) if self._tool_names else None
+        tool_names_str = ",".join(self._tool_names) if self._tool_names else None
         event = _build_metric_event(
             trace_id=self._trace_id,
             span_id=self._span_id,
@@ -442,8 +470,10 @@ class MeteredSyncStream:
             latency_ms=(time.time() - self._t0) * 1000,
             usage=self._final_usage,
             request_id=self._request_id,
-            tool_calls=self._tool_calls if self._tool_calls else None,
+            tool_call_count=tool_count,
+            tool_names=tool_names_str,
             error=self._error,
+            stack_info=self._stack_info,
         )
         _emit_metric_sync(event, self._options)
 
@@ -460,6 +490,9 @@ def _create_async_wrapper(
         if options is None:
             return await original_fn(self, *args, **kwargs)
 
+        # Capture call stack before any async operations
+        stack_info = capture_call_stack(skip_frames=3)
+
         # Extract params - Anthropic messages.create uses kwargs
         params = kwargs.copy()
 
@@ -472,8 +505,9 @@ def _create_async_wrapper(
         context = BeforeRequestContext(
             model=model,
             stream=bool(params.get("stream")),
+            span_id=span_id,
             trace_id=trace_id,
-            timestamp=__import__("datetime").datetime.now(),
+            timestamp=datetime.now(),
             metadata=options.request_metadata,
         )
 
@@ -489,10 +523,14 @@ def _create_async_wrapper(
             # Handle streaming
             if final_params.get("stream") and hasattr(response, "__aiter__"):
                 return MeteredAsyncStream(
-                    response.__aiter__(), trace_id, span_id, model, t0, options
+                    response.__aiter__(), trace_id, span_id, model, t0, options,
+                    stack_info=stack_info,
                 )
 
-            # Non-streaming response
+            # Non-streaming response - extract tool calls
+            tool_count, tool_names = (
+                _extract_tool_calls(response) if options.track_tool_calls else (None, None)
+            )
             event = _build_metric_event(
                 trace_id=trace_id,
                 span_id=span_id,
@@ -501,7 +539,9 @@ def _create_async_wrapper(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=normalize_anthropic_usage(getattr(response, "usage", None)),
                 request_id=_extract_request_id(response),
-                tool_calls=_extract_tool_calls(response) if options.track_tool_calls else None,
+                tool_call_count=tool_count,
+                tool_names=tool_names,
+                stack_info=stack_info,
             )
             await _emit_metric(event, options)
             return response
@@ -515,6 +555,7 @@ def _create_async_wrapper(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=None,
                 error=str(e),
+                stack_info=stack_info,
             )
             await _emit_metric(event, options)
             raise
@@ -534,6 +575,9 @@ def _create_sync_wrapper(
         if options is None:
             return original_fn(self, *args, **kwargs)
 
+        # Capture call stack
+        stack_info = capture_call_stack(skip_frames=3)
+
         params = kwargs.copy()
 
         trace_id = options.generate_trace_id() if options.generate_trace_id else str(uuid4())
@@ -544,8 +588,9 @@ def _create_sync_wrapper(
         context = BeforeRequestContext(
             model=model,
             stream=bool(params.get("stream")),
+            span_id=span_id,
             trace_id=trace_id,
-            timestamp=__import__("datetime").datetime.now(),
+            timestamp=datetime.now(),
             metadata=options.request_metadata,
         )
 
@@ -558,9 +603,14 @@ def _create_sync_wrapper(
 
             if final_params.get("stream") and hasattr(response, "__iter__"):
                 return MeteredSyncStream(
-                    iter(response), trace_id, span_id, model, t0, options
+                    iter(response), trace_id, span_id, model, t0, options,
+                    stack_info=stack_info,
                 )
 
+            # Extract tool calls
+            tool_count, tool_names = (
+                _extract_tool_calls(response) if options.track_tool_calls else (None, None)
+            )
             event = _build_metric_event(
                 trace_id=trace_id,
                 span_id=span_id,
@@ -569,7 +619,9 @@ def _create_sync_wrapper(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=normalize_anthropic_usage(getattr(response, "usage", None)),
                 request_id=_extract_request_id(response),
-                tool_calls=_extract_tool_calls(response) if options.track_tool_calls else None,
+                tool_call_count=tool_count,
+                tool_names=tool_names,
+                stack_info=stack_info,
             )
             _emit_metric_sync(event, options)
             return response
@@ -583,6 +635,7 @@ def _create_sync_wrapper(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=None,
                 error=str(e),
+                stack_info=stack_info,
             )
             _emit_metric_sync(event, options)
             raise

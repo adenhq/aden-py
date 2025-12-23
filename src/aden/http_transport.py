@@ -188,15 +188,8 @@ class HttpTransport:
 
     def _event_to_dict(self, event: MetricEvent) -> dict[str, Any]:
         """Convert MetricEvent to JSON-serializable dict."""
-        d = asdict(event)
-        # Handle nested dataclasses
-        if d.get("usage"):
-            d["usage"] = asdict(event.usage) if event.usage else None
-        if d.get("tool_calls"):
-            d["tool_calls"] = [asdict(tc) for tc in event.tool_calls] if event.tool_calls else None
-        if d.get("rate_limit"):
-            d["rate_limit"] = asdict(event.rate_limit) if event.rate_limit else None
-        return d
+        # MetricEvent uses flat fields, so asdict works directly
+        return asdict(event)
 
     def __call__(self, event: MetricEvent) -> None:
         """Add an event to the send queue."""

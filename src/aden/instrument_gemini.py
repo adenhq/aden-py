@@ -12,6 +12,9 @@ from functools import wraps
 from typing import Any, AsyncIterator, Callable, Iterator
 from uuid import uuid4
 
+from datetime import datetime
+
+from .call_stack import CallStackInfo, capture_call_stack
 from .normalize import normalize_gemini_usage
 from .types import (
     BeforeRequestAction,
@@ -70,20 +73,32 @@ def _build_metric_event(
     usage: NormalizedUsage | None,
     error: str | None = None,
     metadata: dict[str, Any] | None = None,
+    stack_info: CallStackInfo | None = None,
 ) -> MetricEvent:
-    """Builds a MetricEvent for Gemini."""
+    """Builds a MetricEvent for Gemini with flat fields."""
     return MetricEvent(
         trace_id=trace_id,
         span_id=span_id,
         provider="gemini",
         model=model,
         stream=stream,
+        timestamp=datetime.now().isoformat(),
         latency_ms=latency_ms,
-        usage=usage,
         request_id=None,  # Gemini doesn't provide request IDs
-        tool_calls=None,  # TODO: Add Gemini function calling support
         error=error,
+        # Flatten usage
+        input_tokens=usage.input_tokens if usage else 0,
+        output_tokens=usage.output_tokens if usage else 0,
+        total_tokens=usage.total_tokens if usage else 0,
+        cached_tokens=usage.cached_tokens if usage else 0,
+        reasoning_tokens=usage.reasoning_tokens if usage else 0,
         metadata=metadata,
+        # Call stack info
+        call_site_file=stack_info.call_site_file if stack_info else None,
+        call_site_line=stack_info.call_site_line if stack_info else None,
+        call_site_function=stack_info.call_site_function if stack_info else None,
+        call_stack=stack_info.call_stack if stack_info else None,
+        agent_stack=stack_info.agent_stack if stack_info else None,
     )
 
 
@@ -215,6 +230,7 @@ class MeteredAsyncStreamResponse:
         model: str,
         t0: float,
         options: MeterOptions,
+        stack_info: CallStackInfo | None = None,
     ):
         self._stream = stream
         self._trace_id = trace_id
@@ -222,6 +238,7 @@ class MeteredAsyncStreamResponse:
         self._model = model
         self._t0 = t0
         self._options = options
+        self._stack_info = stack_info
         self._final_usage: NormalizedUsage | None = None
         self._done = False
         self._error: str | None = None
@@ -261,6 +278,7 @@ class MeteredAsyncStreamResponse:
             latency_ms=(time.time() - self._t0) * 1000,
             usage=self._final_usage,
             error=self._error,
+            stack_info=self._stack_info,
         )
         await _emit_metric(event, self._options)
 
@@ -276,6 +294,7 @@ class MeteredSyncStreamResponse:
         model: str,
         t0: float,
         options: MeterOptions,
+        stack_info: CallStackInfo | None = None,
     ):
         self._response = response
         self._iterator: Iterator[Any] | None = None
@@ -284,6 +303,7 @@ class MeteredSyncStreamResponse:
         self._model = model
         self._t0 = t0
         self._options = options
+        self._stack_info = stack_info
         self._final_usage: NormalizedUsage | None = None
         self._done = False
         self._error: str | None = None
@@ -330,6 +350,7 @@ class MeteredSyncStreamResponse:
             latency_ms=(time.time() - self._t0) * 1000,
             usage=self._final_usage,
             error=self._error,
+            stack_info=self._stack_info,
         )
         _emit_metric_sync(event, self._options)
 
@@ -347,6 +368,9 @@ def _wrap_generate_content(
         if options is None:
             return original_fn(*args, **kwargs)
 
+        # Capture call stack
+        stack_info = capture_call_stack(skip_frames=3)
+
         model_name = _extract_model_name(model_instance)
         trace_id = options.generate_trace_id() if options.generate_trace_id else str(uuid4())
         span_id = options.generate_span_id() if options.generate_span_id else str(uuid4())
@@ -358,8 +382,9 @@ def _wrap_generate_content(
         context = BeforeRequestContext(
             model=model_name,
             stream=stream,
+            span_id=span_id,
             trace_id=trace_id,
-            timestamp=__import__("datetime").datetime.now(),
+            timestamp=datetime.now(),
             metadata=options.request_metadata,
         )
 
@@ -372,7 +397,8 @@ def _wrap_generate_content(
             # Handle streaming response
             if stream and hasattr(response, "__iter__"):
                 return MeteredSyncStreamResponse(
-                    response, trace_id, span_id, model_name, t0, options
+                    response, trace_id, span_id, model_name, t0, options,
+                    stack_info=stack_info,
                 )
 
             # Non-streaming response - extract usage
@@ -387,6 +413,7 @@ def _wrap_generate_content(
                 stream=False,
                 latency_ms=(time.time() - t0) * 1000,
                 usage=usage,
+                stack_info=stack_info,
             )
             _emit_metric_sync(event, options)
             return response
@@ -400,6 +427,7 @@ def _wrap_generate_content(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=None,
                 error=str(e),
+                stack_info=stack_info,
             )
             _emit_metric_sync(event, options)
             raise
@@ -420,6 +448,9 @@ def _wrap_generate_content_async(
         if options is None:
             return await original_fn(*args, **kwargs)
 
+        # Capture call stack before any async operations
+        stack_info = capture_call_stack(skip_frames=3)
+
         model_name = _extract_model_name(model_instance)
         trace_id = options.generate_trace_id() if options.generate_trace_id else str(uuid4())
         span_id = options.generate_span_id() if options.generate_span_id else str(uuid4())
@@ -430,8 +461,9 @@ def _wrap_generate_content_async(
         context = BeforeRequestContext(
             model=model_name,
             stream=stream,
+            span_id=span_id,
             trace_id=trace_id,
-            timestamp=__import__("datetime").datetime.now(),
+            timestamp=datetime.now(),
             metadata=options.request_metadata,
         )
 
@@ -444,7 +476,8 @@ def _wrap_generate_content_async(
             # Handle streaming response
             if stream and hasattr(response, "__aiter__"):
                 return MeteredAsyncStreamResponse(
-                    response.__aiter__(), trace_id, span_id, model_name, t0, options
+                    response.__aiter__(), trace_id, span_id, model_name, t0, options,
+                    stack_info=stack_info,
                 )
 
             # Non-streaming response
@@ -459,6 +492,7 @@ def _wrap_generate_content_async(
                 stream=False,
                 latency_ms=(time.time() - t0) * 1000,
                 usage=usage,
+                stack_info=stack_info,
             )
             await _emit_metric(event, options)
             return response
@@ -472,6 +506,7 @@ def _wrap_generate_content_async(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=None,
                 error=str(e),
+                stack_info=stack_info,
             )
             await _emit_metric(event, options)
             raise
@@ -492,6 +527,9 @@ def _wrap_send_message(
         if options is None:
             return original_fn(*args, **kwargs)
 
+        # Capture call stack
+        stack_info = capture_call_stack(skip_frames=3)
+
         model_name = _extract_model_name(model_instance)
         trace_id = options.generate_trace_id() if options.generate_trace_id else str(uuid4())
         span_id = options.generate_span_id() if options.generate_span_id else str(uuid4())
@@ -504,7 +542,8 @@ def _wrap_send_message(
 
             if stream and hasattr(response, "__iter__"):
                 return MeteredSyncStreamResponse(
-                    response, trace_id, span_id, model_name, t0, options
+                    response, trace_id, span_id, model_name, t0, options,
+                    stack_info=stack_info,
                 )
 
             usage = None
@@ -518,6 +557,7 @@ def _wrap_send_message(
                 stream=False,
                 latency_ms=(time.time() - t0) * 1000,
                 usage=usage,
+                stack_info=stack_info,
             )
             _emit_metric_sync(event, options)
             return response
@@ -531,6 +571,7 @@ def _wrap_send_message(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=None,
                 error=str(e),
+                stack_info=stack_info,
             )
             _emit_metric_sync(event, options)
             raise
@@ -551,6 +592,9 @@ def _wrap_send_message_async(
         if options is None:
             return await original_fn(*args, **kwargs)
 
+        # Capture call stack before any async operations
+        stack_info = capture_call_stack(skip_frames=3)
+
         model_name = _extract_model_name(model_instance)
         trace_id = options.generate_trace_id() if options.generate_trace_id else str(uuid4())
         span_id = options.generate_span_id() if options.generate_span_id else str(uuid4())
@@ -563,7 +607,8 @@ def _wrap_send_message_async(
 
             if stream and hasattr(response, "__aiter__"):
                 return MeteredAsyncStreamResponse(
-                    response.__aiter__(), trace_id, span_id, model_name, t0, options
+                    response.__aiter__(), trace_id, span_id, model_name, t0, options,
+                    stack_info=stack_info,
                 )
 
             usage = None
@@ -577,6 +622,7 @@ def _wrap_send_message_async(
                 stream=False,
                 latency_ms=(time.time() - t0) * 1000,
                 usage=usage,
+                stack_info=stack_info,
             )
             await _emit_metric(event, options)
             return response
@@ -590,6 +636,7 @@ def _wrap_send_message_async(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=None,
                 error=str(e),
+                stack_info=stack_info,
             )
             await _emit_metric(event, options)
             raise

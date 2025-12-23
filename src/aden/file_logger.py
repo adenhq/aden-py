@@ -123,13 +123,13 @@ class MetricFileLogger:
             "latency_ms": event.latency_ms,
         }
 
-        if event.usage:
+        if event.total_tokens > 0:
             data["usage"] = {
-                "input_tokens": event.usage.input_tokens,
-                "output_tokens": event.usage.output_tokens,
-                "total_tokens": event.usage.total_tokens,
-                "reasoning_tokens": event.usage.reasoning_tokens,
-                "cached_tokens": event.usage.cached_tokens,
+                "input_tokens": event.input_tokens,
+                "output_tokens": event.output_tokens,
+                "total_tokens": event.total_tokens,
+                "reasoning_tokens": event.reasoning_tokens,
+                "cached_tokens": event.cached_tokens,
             }
 
         if event.error:

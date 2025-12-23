@@ -47,16 +47,19 @@ def create_console_emitter(
         ]
         summary = " ".join(filter(None, summary_parts))
 
-        if pretty and event.usage:
+        if pretty and event.total_tokens > 0:
             print(summary)
-            print(f"  tokens: {event.usage.input_tokens} in / {event.usage.output_tokens} out")
-            if event.usage.cached_tokens > 0:
-                print(f"  cached: {event.usage.cached_tokens}")
-            if event.usage.reasoning_tokens > 0:
-                print(f"  reasoning: {event.usage.reasoning_tokens}")
-            if event.tool_calls:
-                tools = ", ".join(t.name or t.type for t in event.tool_calls)
-                print(f"  tools: {tools}")
+            print(f"  tokens: {event.input_tokens} in / {event.output_tokens} out")
+            if event.cached_tokens > 0:
+                print(f"  cached: {event.cached_tokens}")
+            if event.reasoning_tokens > 0:
+                print(f"  reasoning: {event.reasoning_tokens}")
+            if event.tool_names:
+                print(f"  tools: {event.tool_names}")
+            if event.agent_stack:
+                print(f"  agent: {' > '.join(event.agent_stack)}")
+            if event.call_site_file and event.call_site_line:
+                print(f"  call_site: {event.call_site_file}:{event.call_site_line}")
             if event.error:
                 print(f"  error: {event.error}")
         else:

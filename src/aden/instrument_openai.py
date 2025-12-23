@@ -12,6 +12,9 @@ from functools import wraps
 from typing import Any, AsyncIterator, Callable, Iterator
 from uuid import uuid4
 
+from datetime import datetime
+
+from .call_stack import CallStackInfo, capture_call_stack
 from .normalize import normalize_openai_usage
 from .types import (
     BeforeRequestAction,
@@ -21,7 +24,6 @@ from .types import (
     MetricEvent,
     NormalizedUsage,
     RequestCancelledError,
-    ToolCallMetric,
 )
 
 logger = logging.getLogger("aden")
@@ -65,12 +67,16 @@ def _extract_request_id(response: Any) -> str | None:
     return None
 
 
-def _extract_tool_calls(response: Any) -> list[ToolCallMetric]:
-    """Extracts tool call metrics from a response."""
-    tool_calls: list[ToolCallMetric] = []
+def _extract_tool_calls(response: Any) -> tuple[int, str | None]:
+    """Extracts tool call count and names from a response.
+
+    Returns:
+        Tuple of (tool_call_count, tool_names_comma_separated)
+    """
+    tool_names: list[str] = []
 
     if response is None:
-        return tool_calls
+        return (0, None)
 
     # Convert to dict if needed
     if hasattr(response, "model_dump"):
@@ -80,7 +86,7 @@ def _extract_tool_calls(response: Any) -> list[ToolCallMetric]:
     elif isinstance(response, dict):
         data = response
     else:
-        return tool_calls
+        return (0, None)
 
     # Handle output array (Responses API)
     output = data.get("output", [])
@@ -89,9 +95,11 @@ def _extract_tool_calls(response: Any) -> list[ToolCallMetric]:
             if isinstance(item, dict):
                 item_type = item.get("type", "")
                 if item_type == "function_call":
-                    tool_calls.append(ToolCallMetric(type="function", name=item.get("name")))
+                    name = item.get("name")
+                    if name:
+                        tool_names.append(name)
                 elif item_type in ("web_search_call", "code_interpreter_call", "file_search_call"):
-                    tool_calls.append(ToolCallMetric(type=item_type.replace("_call", "")))
+                    tool_names.append(item_type.replace("_call", ""))
 
     # Handle choices array (Chat Completions API)
     choices = data.get("choices", [])
@@ -105,14 +113,13 @@ def _extract_tool_calls(response: Any) -> list[ToolCallMetric]:
                         for tc in tc_list:
                             if isinstance(tc, dict):
                                 fn = tc.get("function", {})
-                                tool_calls.append(
-                                    ToolCallMetric(
-                                        type=tc.get("type", "function"),
-                                        name=fn.get("name") if isinstance(fn, dict) else None,
-                                    )
-                                )
+                                name = fn.get("name") if isinstance(fn, dict) else None
+                                if name:
+                                    tool_names.append(name)
 
-    return tool_calls
+    count = len(tool_names)
+    names = ",".join(tool_names) if tool_names else None
+    return (count, names)
 
 
 def _build_metric_event(
@@ -123,25 +130,41 @@ def _build_metric_event(
     latency_ms: float,
     usage: NormalizedUsage | None,
     request_id: str | None = None,
-    tool_calls: list[ToolCallMetric] | None = None,
+    tool_call_count: int | None = None,
+    tool_names: str | None = None,
     error: str | None = None,
     service_tier: str | None = None,
     metadata: dict[str, Any] | None = None,
+    stack_info: CallStackInfo | None = None,
 ) -> MetricEvent:
-    """Builds a MetricEvent for OpenAI."""
+    """Builds a MetricEvent for OpenAI with flat fields."""
     return MetricEvent(
         trace_id=trace_id,
         span_id=span_id,
         provider="openai",
         model=model,
         stream=stream,
+        timestamp=datetime.now().isoformat(),
         latency_ms=latency_ms,
-        usage=usage,
         request_id=request_id,
-        tool_calls=tool_calls if tool_calls else None,
         error=error,
+        # Flatten usage
+        input_tokens=usage.input_tokens if usage else 0,
+        output_tokens=usage.output_tokens if usage else 0,
+        total_tokens=usage.total_tokens if usage else 0,
+        cached_tokens=usage.cached_tokens if usage else 0,
+        reasoning_tokens=usage.reasoning_tokens if usage else 0,
+        # Flatten tool calls
+        tool_call_count=tool_call_count if tool_call_count and tool_call_count > 0 else None,
+        tool_names=tool_names,
         service_tier=service_tier,
         metadata=metadata,
+        # Call stack info
+        call_site_file=stack_info.call_site_file if stack_info else None,
+        call_site_line=stack_info.call_site_line if stack_info else None,
+        call_site_function=stack_info.call_site_function if stack_info else None,
+        call_stack=stack_info.call_stack if stack_info else None,
+        agent_stack=stack_info.agent_stack if stack_info else None,
     )
 
 
@@ -270,6 +293,7 @@ class MeteredAsyncStream:
         model: str,
         t0: float,
         options: MeterOptions,
+        stack_info: CallStackInfo | None = None,
     ):
         self._stream = stream
         self._trace_id = trace_id
@@ -277,9 +301,10 @@ class MeteredAsyncStream:
         self._model = model
         self._t0 = t0
         self._options = options
+        self._stack_info = stack_info
         self._final_usage: NormalizedUsage | None = None
         self._request_id: str | None = None
-        self._tool_calls: list[ToolCallMetric] = []
+        self._tool_names: list[str] = []
         self._done = False
         self._error: str | None = None
 
@@ -313,13 +338,15 @@ class MeteredAsyncStream:
                     if hasattr(response, "usage"):
                         self._final_usage = normalize_openai_usage(response.usage)
                     if self._options.track_tool_calls:
-                        self._tool_calls.extend(_extract_tool_calls(response))
+                        _, names = _extract_tool_calls(response)
+                        if names:
+                            self._tool_names.extend(names.split(","))
 
                 if self._options.track_tool_calls:
                     if chunk_type == "response.function_call_arguments.done":
-                        self._tool_calls.append(
-                            ToolCallMetric(type="function", name=getattr(chunk, "name", None))
-                        )
+                        name = getattr(chunk, "name", None)
+                        if name:
+                            self._tool_names.append(name)
 
             return chunk
 
@@ -337,6 +364,8 @@ class MeteredAsyncStream:
 
     async def _emit_final_metric(self) -> None:
         """Emit the final metric when stream ends."""
+        tool_count = len(self._tool_names) if self._tool_names else None
+        tool_names_str = ",".join(self._tool_names) if self._tool_names else None
         event = _build_metric_event(
             trace_id=self._trace_id,
             span_id=self._span_id,
@@ -345,8 +374,10 @@ class MeteredAsyncStream:
             latency_ms=(time.time() - self._t0) * 1000,
             usage=self._final_usage,
             request_id=self._request_id,
-            tool_calls=self._tool_calls if self._tool_calls else None,
+            tool_call_count=tool_count,
+            tool_names=tool_names_str,
             error=self._error,
+            stack_info=self._stack_info,
         )
         await _emit_metric(event, self._options)
 
@@ -362,6 +393,7 @@ class MeteredSyncStream:
         model: str,
         t0: float,
         options: MeterOptions,
+        stack_info: CallStackInfo | None = None,
     ):
         self._stream = stream
         self._trace_id = trace_id
@@ -369,9 +401,10 @@ class MeteredSyncStream:
         self._model = model
         self._t0 = t0
         self._options = options
+        self._stack_info = stack_info
         self._final_usage: NormalizedUsage | None = None
         self._request_id: str | None = None
-        self._tool_calls: list[ToolCallMetric] = []
+        self._tool_names: list[str] = []
         self._done = False
         self._error: str | None = None
 
@@ -392,13 +425,15 @@ class MeteredSyncStream:
                     if hasattr(response, "usage"):
                         self._final_usage = normalize_openai_usage(response.usage)
                     if self._options.track_tool_calls:
-                        self._tool_calls.extend(_extract_tool_calls(response))
+                        _, names = _extract_tool_calls(response)
+                        if names:
+                            self._tool_names.extend(names.split(","))
 
                 if self._options.track_tool_calls:
                     if chunk_type == "response.function_call_arguments.done":
-                        self._tool_calls.append(
-                            ToolCallMetric(type="function", name=getattr(chunk, "name", None))
-                        )
+                        name = getattr(chunk, "name", None)
+                        if name:
+                            self._tool_names.append(name)
 
             return chunk
 
@@ -416,6 +451,8 @@ class MeteredSyncStream:
 
     def _emit_final_metric(self) -> None:
         """Emit the final metric when stream ends."""
+        tool_count = len(self._tool_names) if self._tool_names else None
+        tool_names_str = ",".join(self._tool_names) if self._tool_names else None
         event = _build_metric_event(
             trace_id=self._trace_id,
             span_id=self._span_id,
@@ -424,13 +461,17 @@ class MeteredSyncStream:
             latency_ms=(time.time() - self._t0) * 1000,
             usage=self._final_usage,
             request_id=self._request_id,
-            tool_calls=self._tool_calls if self._tool_calls else None,
+            tool_call_count=tool_count,
+            tool_names=tool_names_str,
             error=self._error,
+            stack_info=self._stack_info,
         )
         _emit_metric_sync(event, self._options)
 
 
-def _create_async_wrapper(original_fn: Callable[..., Any], get_options: Callable[[], MeterOptions | None]) -> Callable[..., Any]:
+def _create_async_wrapper(
+    original_fn: Callable[..., Any], get_options: Callable[[], MeterOptions | None]
+) -> Callable[..., Any]:
     """Creates an async wrapper for OpenAI methods."""
 
     @wraps(original_fn)
@@ -449,12 +490,16 @@ def _create_async_wrapper(original_fn: Callable[..., Any], get_options: Callable
         model = params.get("model", "unknown")
         t0 = time.time()
 
+        # Capture call stack before making the request
+        stack_info = capture_call_stack(skip_frames=3)
+
         # Execute beforeRequest hook
         context = BeforeRequestContext(
             model=model,
             stream=bool(params.get("stream")),
+            span_id=span_id,
             trace_id=trace_id,
-            timestamp=__import__("datetime").datetime.now(),
+            timestamp=datetime.now(),
             metadata=options.request_metadata,
         )
 
@@ -469,9 +514,12 @@ def _create_async_wrapper(original_fn: Callable[..., Any], get_options: Callable
 
             # Handle streaming
             if final_params.get("stream") and hasattr(response, "__aiter__"):
-                return MeteredAsyncStream(response.__aiter__(), trace_id, span_id, model, t0, options)
+                return MeteredAsyncStream(response.__aiter__(), trace_id, span_id, model, t0, options, stack_info)
 
-            # Non-streaming response
+            # Non-streaming response - extract tool calls
+            tool_count, tool_names = (
+                _extract_tool_calls(response) if options.track_tool_calls else (None, None)
+            )
             event = _build_metric_event(
                 trace_id=trace_id,
                 span_id=span_id,
@@ -480,7 +528,9 @@ def _create_async_wrapper(original_fn: Callable[..., Any], get_options: Callable
                 latency_ms=(time.time() - t0) * 1000,
                 usage=normalize_openai_usage(getattr(response, "usage", None)),
                 request_id=_extract_request_id(response),
-                tool_calls=_extract_tool_calls(response) if options.track_tool_calls else None,
+                tool_call_count=tool_count,
+                tool_names=tool_names,
+                stack_info=stack_info,
             )
             await _emit_metric(event, options)
             return response
@@ -494,6 +544,7 @@ def _create_async_wrapper(original_fn: Callable[..., Any], get_options: Callable
                 latency_ms=(time.time() - t0) * 1000,
                 usage=None,
                 error=str(e),
+                stack_info=stack_info,
             )
             await _emit_metric(event, options)
             raise
@@ -501,7 +552,9 @@ def _create_async_wrapper(original_fn: Callable[..., Any], get_options: Callable
     return wrapper
 
 
-def _create_sync_wrapper(original_fn: Callable[..., Any], get_options: Callable[[], MeterOptions | None]) -> Callable[..., Any]:
+def _create_sync_wrapper(
+    original_fn: Callable[..., Any], get_options: Callable[[], MeterOptions | None]
+) -> Callable[..., Any]:
     """Creates a sync wrapper for OpenAI methods."""
 
     @wraps(original_fn)
@@ -519,11 +572,15 @@ def _create_sync_wrapper(original_fn: Callable[..., Any], get_options: Callable[
         model = params.get("model", "unknown")
         t0 = time.time()
 
+        # Capture call stack before making the request
+        stack_info = capture_call_stack(skip_frames=3)
+
         context = BeforeRequestContext(
             model=model,
             stream=bool(params.get("stream")),
+            span_id=span_id,
             trace_id=trace_id,
-            timestamp=__import__("datetime").datetime.now(),
+            timestamp=datetime.now(),
             metadata=options.request_metadata,
         )
 
@@ -535,8 +592,12 @@ def _create_sync_wrapper(original_fn: Callable[..., Any], get_options: Callable[
             response = original_fn(self, **final_params) if kwargs else original_fn(self, final_params, *args[1:])
 
             if final_params.get("stream") and hasattr(response, "__iter__"):
-                return MeteredSyncStream(iter(response), trace_id, span_id, model, t0, options)
+                return MeteredSyncStream(iter(response), trace_id, span_id, model, t0, options, stack_info)
 
+            # Extract tool calls
+            tool_count, tool_names = (
+                _extract_tool_calls(response) if options.track_tool_calls else (None, None)
+            )
             event = _build_metric_event(
                 trace_id=trace_id,
                 span_id=span_id,
@@ -545,7 +606,9 @@ def _create_sync_wrapper(original_fn: Callable[..., Any], get_options: Callable[
                 latency_ms=(time.time() - t0) * 1000,
                 usage=normalize_openai_usage(getattr(response, "usage", None)),
                 request_id=_extract_request_id(response),
-                tool_calls=_extract_tool_calls(response) if options.track_tool_calls else None,
+                tool_call_count=tool_count,
+                tool_names=tool_names,
+                stack_info=stack_info,
             )
             _emit_metric_sync(event, options)
             return response
@@ -559,6 +622,7 @@ def _create_sync_wrapper(original_fn: Callable[..., Any], get_options: Callable[
                 latency_ms=(time.time() - t0) * 1000,
                 usage=None,
                 error=str(e),
+                stack_info=stack_info,
             )
             _emit_metric_sync(event, options)
             raise

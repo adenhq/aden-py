@@ -28,6 +28,11 @@ from .instrument_gemini import (
     is_gemini_instrumented,
     uninstrument_gemini,
 )
+from .instrument_genai import (
+    instrument_genai,
+    is_genai_instrumented,
+    uninstrument_genai,
+)
 from .instrument_openai import (
     instrument_openai,
     is_openai_instrumented,
@@ -242,11 +247,13 @@ async def instrument_async(options: MeterOptions) -> InstrumentationResultWithAg
     openai_result = instrument_openai(resolved_options)
     anthropic_result = instrument_anthropic(resolved_options)
     gemini_result = instrument_gemini(resolved_options)
+    genai_result = instrument_genai(resolved_options)
 
     result = InstrumentationResultWithAgent(
         openai=openai_result,
         anthropic=anthropic_result,
         gemini=gemini_result,
+        genai=genai_result,
         control_agent=_global_control_agent,
     )
 
@@ -258,6 +265,8 @@ async def instrument_async(options: MeterOptions) -> InstrumentationResultWithAg
         instrumented.append("anthropic")
     if result.gemini:
         instrumented.append("gemini")
+    if result.genai:
+        instrumented.append("genai")
 
     if instrumented:
         control_status = " + control agent" if _global_control_agent else ""
@@ -336,11 +345,13 @@ def instrument(options: MeterOptions) -> InstrumentationResult:
     openai_result = instrument_openai(options)
     anthropic_result = instrument_anthropic(options)
     gemini_result = instrument_gemini(options)
+    genai_result = instrument_genai(options)
 
     result = InstrumentationResult(
         openai=openai_result,
         anthropic=anthropic_result,
         gemini=gemini_result,
+        genai=genai_result,
     )
 
     # Log which SDKs were instrumented
@@ -351,6 +362,8 @@ def instrument(options: MeterOptions) -> InstrumentationResult:
         instrumented.append("anthropic")
     if result.gemini:
         instrumented.append("gemini")
+    if result.genai:
+        instrumented.append("genai")
 
     if instrumented:
         logger.info(f"[aden] Instrumented: {', '.join(instrumented)}")
@@ -376,6 +389,7 @@ async def uninstrument_async() -> None:
     uninstrument_openai()
     uninstrument_anthropic()
     uninstrument_gemini()
+    uninstrument_genai()
 
     _global_options = None
     logger.info("[aden] All SDKs uninstrumented")
@@ -404,6 +418,7 @@ def uninstrument() -> None:
     uninstrument_openai()
     uninstrument_anthropic()
     uninstrument_gemini()
+    uninstrument_genai()
 
     _global_options = None
     logger.info("[aden] All SDKs uninstrumented")
@@ -420,6 +435,7 @@ def get_instrumented_sdks() -> InstrumentationResult:
         openai=is_openai_instrumented(),
         anthropic=is_anthropic_instrumented(),
         gemini=is_gemini_instrumented(),
+        genai=is_genai_instrumented(),
     )
 
 
@@ -434,6 +450,7 @@ def is_instrumented() -> bool:
         is_openai_instrumented()
         or is_anthropic_instrumented()
         or is_gemini_instrumented()
+        or is_genai_instrumented()
     )
 
 
@@ -514,8 +531,12 @@ __all__ = [
     "instrument_anthropic",
     "uninstrument_anthropic",
     "is_anthropic_instrumented",
-    # Gemini
+    # Gemini (google-generativeai)
     "instrument_gemini",
     "uninstrument_gemini",
     "is_gemini_instrumented",
+    # GenAI (google-genai)
+    "instrument_genai",
+    "uninstrument_genai",
+    "is_genai_instrumented",
 ]

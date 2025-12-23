@@ -569,7 +569,7 @@ class ControlAgent(IControlAgent):
 
         # Update local budget tracking
         if self._cached_policy and self._cached_policy.budgets:
-            if event.usage and event.usage.total_tokens > 0:
+            if event.total_tokens > 0:
                 estimated_cost = self._estimate_cost(event)
                 context_id = (
                     self.options.get_context_id() if self.options.get_context_id else None
@@ -582,11 +582,11 @@ class ControlAgent(IControlAgent):
 
     def _estimate_cost(self, event: MetricEvent) -> float:
         """Estimate cost from a metric event."""
-        if not event.usage:
+        if event.total_tokens == 0:
             return 0.0
         # Simplified cost estimation
-        input_cost = event.usage.input_tokens * 0.00001  # $0.01 per 1K tokens
-        output_cost = event.usage.output_tokens * 0.00003  # $0.03 per 1K tokens
+        input_cost = event.input_tokens * 0.00001  # $0.01 per 1K tokens
+        output_cost = event.output_tokens * 0.00003  # $0.03 per 1K tokens
         return input_cost + output_cost
 
     async def report_control_event(self, event: ControlEvent) -> None:

@@ -12,6 +12,13 @@ import sys
 # Add parent directory to path for local development
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, use shell environment
+
 from openai import OpenAI
 
 from aden import (
