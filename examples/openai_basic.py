@@ -25,6 +25,10 @@ from aden import (
     instrument,
     uninstrument,
     create_console_emitter,
+    create_control_agent,
+    create_control_agent_emitter,
+    create_multi_emitter,
+    ControlAgentOptions,
     MeterOptions,
 )
 
@@ -88,10 +92,19 @@ def main() -> None:
     """Run all OpenAI tests."""
     print("Starting OpenAI SDK tests...\n")
 
-    # Initialize instrumentation
+    # Create control agent that connects to the server
+    agent = create_control_agent(ControlAgentOptions(
+        server_url=os.environ.get("ADEN_API_URL", "http://localhost:8888"),
+        api_key=os.environ.get("ADEN_API_KEY", ""),
+    ))
+
+    # Initialize instrumentation with both console AND server emitters
     result = instrument(
         MeterOptions(
-            emit_metric=create_console_emitter(pretty=True),
+            emit_metric=create_multi_emitter([
+                create_console_emitter(pretty=True),
+                create_control_agent_emitter(agent),
+            ]),
         )
     )
     print(f"Instrumented: openai={result.openai}")
@@ -105,6 +118,7 @@ def main() -> None:
         test_with_tools(client)
     finally:
         uninstrument()
+        agent.disconnect_sync()
 
     print("\n=== All OpenAI tests complete ===\n")
 

@@ -287,7 +287,7 @@ class MeteredAsyncStream:
 
     def __init__(
         self,
-        stream: AsyncIterator[Any],
+        stream: Any,  # The original stream object (not just iterator)
         trace_id: str,
         span_id: str,
         model: str,
@@ -295,7 +295,8 @@ class MeteredAsyncStream:
         options: MeterOptions,
         stack_info: CallStackInfo | None = None,
     ):
-        self._stream = stream
+        self._original_stream = stream  # Keep reference to original for context manager
+        self._iterator: AsyncIterator[Any] | None = None
         self._trace_id = trace_id
         self._span_id = span_id
         self._model = model
@@ -309,33 +310,47 @@ class MeteredAsyncStream:
         self._error: str | None = None
 
     def __aiter__(self) -> "MeteredAsyncStream":
+        if self._iterator is None:
+            self._iterator = self._original_stream.__aiter__()
         return self
 
     async def __aenter__(self) -> "MeteredAsyncStream":
-        """Support async context manager protocol."""
+        """Support async context manager protocol - delegate to original stream."""
+        if hasattr(self._original_stream, "__aenter__"):
+            await self._original_stream.__aenter__()
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Cleanup on context manager exit."""
+        # First emit our metric
         if not self._done:
             self._done = True
             if exc_val:
                 self._error = str(exc_val)
             await self._emit_final_metric()
+        # Then delegate to original stream's __aexit__
+        if hasattr(self._original_stream, "__aexit__"):
+            await self._original_stream.__aexit__(exc_type, exc_val, exc_tb)
 
     async def __anext__(self) -> Any:
         try:
-            chunk = await self._stream.__anext__()
+            if self._iterator is None:
+                self._iterator = self._original_stream.__aiter__()
+            chunk = await self._iterator.__anext__()
 
             if self._request_id is None:
                 self._request_id = _extract_request_id(chunk)
 
-            # Check for completed event with usage
+            # Chat Completions API: usage comes directly on chunk in final message
+            if hasattr(chunk, "usage") and chunk.usage is not None:
+                self._final_usage = normalize_openai_usage(chunk.usage)
+
+            # Responses API: usage comes in response.completed event
             if hasattr(chunk, "type"):
                 chunk_type = chunk.type
                 if chunk_type in ("response.completed", "message_stop"):
                     response = getattr(chunk, "response", chunk)
-                    if hasattr(response, "usage"):
+                    if hasattr(response, "usage") and response.usage is not None:
                         self._final_usage = normalize_openai_usage(response.usage)
                     if self._options.track_tool_calls:
                         _, names = _extract_tool_calls(response)
@@ -387,7 +402,7 @@ class MeteredSyncStream:
 
     def __init__(
         self,
-        stream: Iterator[Any],
+        stream: Any,  # The original stream object (not just iterator)
         trace_id: str,
         span_id: str,
         model: str,
@@ -395,7 +410,8 @@ class MeteredSyncStream:
         options: MeterOptions,
         stack_info: CallStackInfo | None = None,
     ):
-        self._stream = stream
+        self._original_stream = stream  # Keep reference to original for context manager
+        self._iterator: Iterator[Any] | None = None
         self._trace_id = trace_id
         self._span_id = span_id
         self._model = model
@@ -409,21 +425,56 @@ class MeteredSyncStream:
         self._error: str | None = None
 
     def __iter__(self) -> "MeteredSyncStream":
+        if self._iterator is None:
+            self._iterator = iter(self._original_stream)
         return self
+
+    def __enter__(self) -> "MeteredSyncStream":
+        """Support context manager protocol - delegate to original stream."""
+        if hasattr(self._original_stream, "__enter__"):
+            self._original_stream.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Cleanup on context manager exit."""
+        # First emit our metric
+        if not self._done:
+            self._done = True
+            if exc_val:
+                self._error = str(exc_val)
+            self._emit_final_metric()
+        # Then delegate to original stream's __exit__
+        if hasattr(self._original_stream, "__exit__"):
+            self._original_stream.__exit__(exc_type, exc_val, exc_tb)
 
     def __next__(self) -> Any:
         try:
-            chunk = next(self._stream)
+            if self._iterator is None:
+                self._iterator = iter(self._original_stream)
+            chunk = next(self._iterator)
 
             if self._request_id is None:
                 self._request_id = _extract_request_id(chunk)
 
+            # Chat Completions API: usage comes directly on chunk in final message
+            if hasattr(chunk, "usage") and chunk.usage is not None:
+                self._final_usage = normalize_openai_usage(chunk.usage)
+                logger.debug(
+                    f"[aden] Stream usage captured: input={self._final_usage.input_tokens}, "
+                    f"output={self._final_usage.output_tokens}, trace_id={self._trace_id[:8]}"
+                )
+
+            # Responses API: usage comes in response.completed event
             if hasattr(chunk, "type"):
                 chunk_type = chunk.type
                 if chunk_type in ("response.completed", "message_stop"):
                     response = getattr(chunk, "response", chunk)
-                    if hasattr(response, "usage"):
+                    if hasattr(response, "usage") and response.usage is not None:
                         self._final_usage = normalize_openai_usage(response.usage)
+                        logger.debug(
+                            f"[aden] Response usage captured: input={self._final_usage.input_tokens}, "
+                            f"output={self._final_usage.output_tokens}, trace_id={self._trace_id[:8]}"
+                        )
                     if self._options.track_tool_calls:
                         _, names = _extract_tool_calls(response)
                         if names:
@@ -453,6 +504,18 @@ class MeteredSyncStream:
         """Emit the final metric when stream ends."""
         tool_count = len(self._tool_names) if self._tool_names else None
         tool_names_str = ",".join(self._tool_names) if self._tool_names else None
+
+        if self._final_usage:
+            logger.debug(
+                f"[aden] Emitting stream metric: model={self._model}, "
+                f"input_tokens={self._final_usage.input_tokens}, output_tokens={self._final_usage.output_tokens}, "
+                f"trace_id={self._trace_id[:8]}"
+            )
+        else:
+            logger.debug(
+                f"[aden] Emitting stream metric with NO USAGE: model={self._model}, trace_id={self._trace_id[:8]}"
+            )
+
         event = _build_metric_event(
             trace_id=self._trace_id,
             span_id=self._span_id,
@@ -509,25 +572,49 @@ def _create_async_wrapper(
         # Update model if degraded
         model = final_params.get("model", model)
 
+        # Inject stream_options to get usage info in streaming responses
+        if final_params.get("stream"):
+            stream_options = final_params.get("stream_options", {}) or {}
+            if not stream_options.get("include_usage"):
+                final_params = {**final_params, "stream_options": {**stream_options, "include_usage": True}}
+
         try:
             response = await original_fn(self, **final_params) if kwargs else await original_fn(self, final_params, *args[1:])
 
             # Handle streaming
             if final_params.get("stream") and hasattr(response, "__aiter__"):
-                return MeteredAsyncStream(response.__aiter__(), trace_id, span_id, model, t0, options, stack_info)
+                return MeteredAsyncStream(response, trace_id, span_id, model, t0, options, stack_info)
+
+            # Handle raw response wrappers (LegacyAPIResponse, APIResponse) from with_raw_response
+            # These wrappers contain HTTP metadata and need .parse() to get the actual response
+            parsed_response = response
+            response_type = type(response).__name__
+            if response_type in ("LegacyAPIResponse", "APIResponse") and hasattr(response, "parse"):
+                try:
+                    parsed_response = response.parse()
+                    logger.debug(f"[aden] Extracted parsed response from {response_type}, trace_id={trace_id[:8]}")
+                except Exception:
+                    pass  # Keep original response if parse fails
 
             # Non-streaming response - extract tool calls
             tool_count, tool_names = (
-                _extract_tool_calls(response) if options.track_tool_calls else (None, None)
+                _extract_tool_calls(parsed_response) if options.track_tool_calls else (None, None)
             )
+            usage = normalize_openai_usage(getattr(parsed_response, "usage", None))
+            if usage:
+                logger.debug(
+                    f"[aden] Async non-stream response: model={model}, "
+                    f"input_tokens={usage.input_tokens}, output_tokens={usage.output_tokens}, "
+                    f"trace_id={trace_id[:8]}"
+                )
             event = _build_metric_event(
                 trace_id=trace_id,
                 span_id=span_id,
                 model=model,
                 stream=False,
                 latency_ms=(time.time() - t0) * 1000,
-                usage=normalize_openai_usage(getattr(response, "usage", None)),
-                request_id=_extract_request_id(response),
+                usage=usage,
+                request_id=_extract_request_id(parsed_response),
                 tool_call_count=tool_count,
                 tool_names=tool_names,
                 stack_info=stack_info,
@@ -588,23 +675,56 @@ def _create_sync_wrapper(
         final_params = _handle_before_request_result_sync(result, params, context)
         model = final_params.get("model", model)
 
+        # Inject stream_options to get usage info in streaming responses
+        if final_params.get("stream"):
+            stream_options = final_params.get("stream_options", {}) or {}
+            if not stream_options.get("include_usage"):
+                final_params = {**final_params, "stream_options": {**stream_options, "include_usage": True}}
+                logger.debug(f"[aden] Injected stream_options.include_usage=True for trace_id={trace_id[:8]}")
+
         try:
             response = original_fn(self, **final_params) if kwargs else original_fn(self, final_params, *args[1:])
 
             if final_params.get("stream") and hasattr(response, "__iter__"):
-                return MeteredSyncStream(iter(response), trace_id, span_id, model, t0, options, stack_info)
+                return MeteredSyncStream(response, trace_id, span_id, model, t0, options, stack_info)
+
+            # Handle raw response wrappers (LegacyAPIResponse, APIResponse) from with_raw_response
+            # These wrappers contain HTTP metadata and need .parse() to get the actual response
+            parsed_response = response
+            response_type = type(response).__name__
+            if response_type in ("LegacyAPIResponse", "APIResponse") and hasattr(response, "parse"):
+                try:
+                    parsed_response = response.parse()
+                    logger.debug(f"[aden] Extracted parsed response from {response_type}, trace_id={trace_id[:8]}")
+                except Exception:
+                    pass  # Keep original response if parse fails
 
             # Extract tool calls
             tool_count, tool_names = (
-                _extract_tool_calls(response) if options.track_tool_calls else (None, None)
+                _extract_tool_calls(parsed_response) if options.track_tool_calls else (None, None)
             )
+            raw_usage = getattr(parsed_response, "usage", None)
+            usage = normalize_openai_usage(raw_usage)
+            if usage:
+                logger.debug(
+                    f"[aden] Non-stream response: model={model}, "
+                    f"input_tokens={usage.input_tokens}, output_tokens={usage.output_tokens}, "
+                    f"trace_id={trace_id[:8]}"
+                )
+            else:
+                logger.debug(
+                    f"[aden] Non-stream response with NO USAGE: model={model}, trace_id={trace_id[:8]}, "
+                    f"response_type={type(response).__name__}, raw_usage={raw_usage}, "
+                    f"has_usage_attr={hasattr(response, 'usage')}"
+                )
+
             event = _build_metric_event(
                 trace_id=trace_id,
                 span_id=span_id,
                 model=model,
                 stream=False,
                 latency_ms=(time.time() - t0) * 1000,
-                usage=normalize_openai_usage(getattr(response, "usage", None)),
+                usage=usage,
                 request_id=_extract_request_id(response),
                 tool_call_count=tool_count,
                 tool_names=tool_names,
