@@ -41,8 +41,8 @@ except ImportError:
     sys.exit(1)
 
 from aden import (
-    instrument,
-    uninstrument,
+    instrument_async,
+    uninstrument_async,
     create_console_emitter,
     MeterOptions,
 )
@@ -279,7 +279,8 @@ async def main() -> None:
 
     # Initialize Aden instrumentation BEFORE creating agents
     # This patches OpenAI/Anthropic SDKs that PydanticAI uses internally
-    result = instrument(
+    # Use instrument_async() since we're in an async context
+    result = await instrument_async(
         MeterOptions(
             emit_metric=create_console_emitter(pretty=True),
             track_tool_calls=True,
@@ -296,7 +297,7 @@ async def main() -> None:
         await test_multi_agent_workflow()
         await test_with_dependencies()
     finally:
-        uninstrument()
+        await uninstrument_async()
 
     print("\n" + "=" * 60)
     print("All PydanticAI tests complete!")

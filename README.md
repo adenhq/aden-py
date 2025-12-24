@@ -32,6 +32,7 @@ response = client.chat.completions.create(
 - [What Metrics Are Collected?](#what-metrics-are-collected)
 - [Metric Emitters](#metric-emitters)
 - [Advanced Configuration](#advanced-configuration)
+- [Sync vs Async Context](#sync-vs-async-context)
 - [API Reference](#api-reference)
 - [Examples](#examples)
 - [Troubleshooting](#troubleshooting)
@@ -486,14 +487,237 @@ metered = make_metered_openai(client, MeterOptions(
 
 ---
 
+## Sync vs Async Context
+
+**Understanding when to use sync vs async instrumentation is critical for proper operation**, especially when using the control server for budget enforcement.
+
+### The Problem
+
+Python applications can run in two contexts:
+
+- **Sync context**: Regular Python code without an event loop (e.g., scripts, CLI tools, Flask)
+- **Async context**: Code running inside an async event loop (e.g., `asyncio.run()`, FastAPI, async frameworks)
+
+Aden's control agent uses WebSocket/HTTP connections that are inherently async. When you call `instrument()` with an API key from a sync context, it needs to establish these connections. When called from an async context, different handling is required.
+
+### Quick Reference
+
+| Your Context | Instrumentation | Uninstrumentation |
+|--------------|-----------------|-------------------|
+| Sync (no event loop) | `instrument()` | `uninstrument()` |
+| Async (inside event loop) | `await instrument_async()` | `await uninstrument_async()` |
+
+### Sync Context (Scripts, CLI, Flask)
+
+Use `instrument()` and `uninstrument()` when you're **not** inside an async event loop:
+
+```python
+from aden import instrument, uninstrument, MeterOptions
+
+# Works correctly - no event loop running
+instrument(MeterOptions(
+    api_key="your-api-key",
+    emit_metric=my_emitter,
+))
+
+# Use LLM SDKs normally
+from openai import OpenAI
+client = OpenAI()
+response = client.chat.completions.create(...)
+
+# Clean up
+uninstrument()
+```
+
+**How it works**: When an API key is provided, `instrument()` internally creates an event loop to connect to the control server. Metrics are queued and sent via a background thread.
+
+### Async Context (FastAPI, asyncio.run, PydanticAI)
+
+Use `instrument_async()` and `uninstrument_async()` when you're **inside** an async event loop:
+
+```python
+import asyncio
+from aden import instrument_async, uninstrument_async, MeterOptions
+
+async def main():
+    # Must use async version inside event loop
+    result = await instrument_async(MeterOptions(
+        api_key="your-api-key",
+        emit_metric=my_emitter,
+    ))
+
+    # Use LLM SDKs normally
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI()
+    response = await client.chat.completions.create(...)
+
+    # Clean up with async version
+    await uninstrument_async()
+
+asyncio.run(main())
+```
+
+**How it works**: The async version uses the existing event loop for all operations, avoiding the need for background threads.
+
+### Common Mistakes
+
+#### ❌ Wrong: Using sync instrument inside asyncio.run()
+
+```python
+import asyncio
+from aden import instrument, MeterOptions
+
+async def main():
+    # WRONG: This is inside an event loop!
+    instrument(MeterOptions(api_key="..."))  # Will log a warning
+    # Control agent won't be created properly
+
+asyncio.run(main())
+```
+
+You'll see this warning:
+```
+[aden] API key provided but called from async context. Use instrument_async() for control agent support.
+```
+
+#### ✅ Correct: Using async instrument inside asyncio.run()
+
+```python
+import asyncio
+from aden import instrument_async, uninstrument_async, MeterOptions
+
+async def main():
+    # CORRECT: Using async version
+    await instrument_async(MeterOptions(api_key="..."))
+    # ... your code ...
+    await uninstrument_async()
+
+asyncio.run(main())
+```
+
+### Framework-Specific Examples
+
+#### FastAPI
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from aden import instrument_async, uninstrument_async, MeterOptions
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: inside async context
+    await instrument_async(MeterOptions(api_key="..."))
+    yield
+    # Shutdown
+    await uninstrument_async()
+
+app = FastAPI(lifespan=lifespan)
+```
+
+#### Flask
+
+```python
+from flask import Flask
+from aden import instrument, uninstrument, MeterOptions
+
+app = Flask(__name__)
+
+# Sync context at module level
+instrument(MeterOptions(api_key="..."))
+
+@app.teardown_appcontext
+def cleanup(exception):
+    uninstrument()
+```
+
+#### PydanticAI
+
+PydanticAI uses async internally, so always use async instrumentation:
+
+```python
+import asyncio
+from pydantic_ai import Agent
+from aden import instrument_async, uninstrument_async, MeterOptions
+
+async def main():
+    await instrument_async(MeterOptions(api_key="..."))
+
+    agent = Agent("openai:gpt-4o-mini")
+    result = await agent.run("Hello!")
+
+    await uninstrument_async()
+
+asyncio.run(main())
+```
+
+#### LangGraph / LangChain
+
+LangGraph can run in both sync and async modes. Match your instrumentation:
+
+```python
+# Sync LangGraph
+from aden import instrument, uninstrument, MeterOptions
+
+instrument(MeterOptions(api_key="..."))
+# graph.invoke(...)  # Sync
+uninstrument()
+
+# Async LangGraph
+import asyncio
+from aden import instrument_async, uninstrument_async, MeterOptions
+
+async def main():
+    await instrument_async(MeterOptions(api_key="..."))
+    # await graph.ainvoke(...)  # Async
+    await uninstrument_async()
+
+asyncio.run(main())
+```
+
+### Without API Key (Local Only)
+
+If you're **not** using the control server (no `api_key`), you can use `instrument()` from any context:
+
+```python
+from aden import instrument, uninstrument, MeterOptions, create_console_emitter
+
+# Works from anywhere - no server connection needed
+instrument(MeterOptions(
+    emit_metric=create_console_emitter(pretty=True),
+))
+
+# Later...
+uninstrument()
+```
+
+This is because without an API key, no async connections need to be established.
+
+### How Metrics Are Sent
+
+| Context | With API Key | Without API Key |
+|---------|--------------|-----------------|
+| Sync | Background thread flushes every 1s | Emitter called synchronously |
+| Async | Event loop sends immediately | Emitter called (sync or async) |
+
+The sync context uses a background thread that:
+- Queues metrics as they're generated
+- Flushes to the server every 1 second
+- Also flushes when batch size (10 events) is reached
+- Performs a final flush on `uninstrument()`
+
+---
+
 ## API Reference
 
 ### Core Functions
 
 | Function | Description |
 |----------|-------------|
-| `instrument(options)` | Instrument all available LLM SDKs globally |
-| `uninstrument()` | Remove instrumentation |
+| `instrument(options)` | Instrument all SDKs (sync context) |
+| `instrument_async(options)` | Instrument all SDKs (async context) |
+| `uninstrument()` | Remove instrumentation (sync context) |
+| `uninstrument_async()` | Remove instrumentation (async context) |
 | `is_instrumented()` | Check if instrumented |
 | `get_instrumented_sdks()` | Get which SDKs are instrumented |
 
@@ -613,6 +837,44 @@ Run examples with `python examples/<name>.py`:
        print(chunk.choices[0].delta.content or "", end="")
    # Metrics emitted here
    ```
+
+### Control agent not working / Metrics not sent to server
+
+1. **Check you're using the right function for your context**:
+   ```python
+   # If you see this warning:
+   # [aden] API key provided but called from async context. Use instrument_async()
+
+   # You're calling instrument() from inside asyncio.run() or similar
+   # Solution: use instrument_async() instead
+
+   async def main():
+       await instrument_async(MeterOptions(api_key="..."))  # Correct
+       # ...
+       await uninstrument_async()
+
+   asyncio.run(main())
+   ```
+
+2. **Ensure uninstrument is called**: The sync context uses a background thread that flushes on shutdown
+   ```python
+   # Always call uninstrument() to flush remaining metrics
+   uninstrument()  # or await uninstrument_async()
+   ```
+
+3. **Check aiohttp is installed**: The control agent requires aiohttp
+   ```bash
+   pip install aiohttp
+   ```
+
+### Async coroutine warnings
+
+If you see warnings like:
+```
+RuntimeWarning: coroutine '...' was never awaited
+```
+
+This usually means you're mixing sync and async contexts incorrectly. See [Sync vs Async Context](#sync-vs-async-context) for the correct patterns.
 
 ---
 
