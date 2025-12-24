@@ -93,16 +93,19 @@ class ControlAgent(IControlAgent):
     async def connect(self) -> None:
         """Connect to the control server."""
         url = self.options.server_url
+        logger.info(f"[aden] Connecting to control server: {url}")
 
         # Determine transport based on URL scheme
         if url.startswith("wss://") or url.startswith("ws://"):
             await self._connect_websocket()
         else:
             # HTTP-only mode: just use polling
+            logger.debug("[aden] Using HTTP polling mode")
             await self._start_polling()
 
         # Start heartbeat
         self._start_heartbeat()
+        logger.info("[aden] Control agent started")
 
     async def _connect_websocket(self) -> None:
         """Connect via WebSocket."""
@@ -329,6 +332,7 @@ class ControlAgent(IControlAgent):
 
     def disconnect_sync(self) -> None:
         """Disconnect from the control server (sync version)."""
+        logger.debug("[aden] Disconnecting control agent (sync)")
         # Stop the background flush thread (which also does final flush)
         self._stop_sync_flush_thread()
 
@@ -340,9 +344,11 @@ class ControlAgent(IControlAgent):
             self._reconnect_task = None
 
         self._connected = False
+        logger.info("[aden] Control agent disconnected")
 
     async def disconnect(self) -> None:
         """Disconnect from the control server."""
+        logger.debug("[aden] Disconnecting control agent (async)")
         # Flush any remaining events
         await self._flush_event_queue()
 
@@ -358,6 +364,7 @@ class ControlAgent(IControlAgent):
             self._ws = None
 
         self._connected = False
+        logger.info("[aden] Control agent disconnected")
 
     def get_decision_sync(self, request: ControlRequest) -> ControlDecision:
         """Get a control decision for a request (sync version)."""
@@ -621,16 +628,26 @@ class ControlAgent(IControlAgent):
         if not self._event_queue:
             return
 
+        events = self._event_queue.copy()
+        self._event_queue.clear()
+        event_count = len(events)
+        logger.debug(f"[aden] Flushing {event_count} events to server")
+
         try:
-            events = self._event_queue.copy()
-            self._event_queue.clear()
-            self._http_request_sync(
+            result = self._http_request_sync(
                 "/v1/control/events",
                 "POST",
                 {"events": [asdict(e) for e in events]},
             )
+            if result.get("ok"):
+                logger.debug(f"[aden] Successfully sent {event_count} events")
+            else:
+                logger.warning(
+                    f"[aden] Failed to send {event_count} events to server: "
+                    f"status={result.get('status', 'unknown')}"
+                )
         except Exception as e:
-            logger.warning(f"[aden] Failed to flush event queue sync: {e}")
+            logger.warning(f"[aden] Failed to flush {event_count} events: {e}")
 
     def _start_sync_flush_thread(self) -> None:
         """Start the background thread for periodic sync flushing."""
@@ -791,28 +808,37 @@ class ControlAgent(IControlAgent):
         if not self._event_queue:
             return
 
+        events = self._event_queue.copy()
+        self._event_queue.clear()
+        event_count = len(events)
+        logger.debug(f"[aden] Flushing {event_count} events to server")
+
         # If WebSocket connected, send there
         if self._connected and self._ws:
-            events = self._event_queue.copy()
-            self._event_queue.clear()
             for event in events:
                 try:
                     await self._ws.send(json.dumps(asdict(event)))
                 except Exception:
                     self._queue_event(event)
+            logger.debug(f"[aden] Sent {event_count} events via WebSocket")
             return
 
         # Otherwise send via HTTP batch
         try:
-            events = self._event_queue.copy()
-            self._event_queue.clear()
-            await self._http_request(
+            result = await self._http_request(
                 "/v1/control/events",
                 "POST",
                 {"events": [asdict(e) for e in events]},
             )
+            if result.get("ok"):
+                logger.debug(f"[aden] Successfully sent {event_count} events")
+            else:
+                logger.warning(
+                    f"[aden] Failed to send {event_count} events to server: "
+                    f"status={result.get('status', 'unknown')}"
+                )
         except Exception as e:
-            logger.warning(f"[aden] Failed to flush event queue: {e}")
+            logger.warning(f"[aden] Failed to flush {event_count} events: {e}")
 
     async def _http_request(
         self, path: str, method: str, body: dict[str, Any] | None = None

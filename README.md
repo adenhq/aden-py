@@ -485,6 +485,69 @@ metered = make_metered_openai(client, MeterOptions(
 ))
 ```
 
+### Logging Configuration
+
+Aden uses Python's logging module with two loggers:
+
+| Logger | Purpose | Default Level |
+|--------|---------|---------------|
+| `aden` | Connection status, warnings, errors | INFO |
+| `aden.metrics` | Detailed metric output | DEBUG |
+
+**Environment Variable (Recommended):**
+
+Set the `ADEN_LOG_LEVEL` environment variable to control log verbosity:
+
+```bash
+# Show only warnings and errors (production)
+export ADEN_LOG_LEVEL=warning
+
+# Show debug info (development)
+export ADEN_LOG_LEVEL=debug
+```
+
+**Programmatic Configuration:**
+
+Use `configure_logging()` to configure logging in code:
+
+```python
+from aden import configure_logging, instrument, MeterOptions, create_console_emitter
+
+# Show all logs including debug info
+configure_logging(level="debug")
+
+# Or show only warnings and errors (quiet mode)
+configure_logging(level="warning")
+
+# Use logging-based console emitter (metrics at DEBUG level)
+instrument(MeterOptions(
+    emit_metric=create_console_emitter(use_logging=True),
+))
+```
+
+**Log Level Reference:**
+
+| Level | What You'll See |
+|-------|-----------------|
+| `debug` | Everything: flush events, metric details, connection state |
+| `info` | Connection status, SDK instrumentation, control agent start/stop |
+| `warning` | HTTP failures, connection issues, config problems |
+| `error` | Critical errors only |
+
+**Manual Configuration:**
+
+If you prefer to configure logging yourself:
+
+```python
+import logging
+
+# Configure aden logger
+logging.getLogger("aden").setLevel(logging.DEBUG)
+
+# Configure metrics logger separately
+logging.getLogger("aden.metrics").setLevel(logging.DEBUG)
+```
+
 ---
 
 ## Sync vs Async Context

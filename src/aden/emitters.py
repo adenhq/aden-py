@@ -7,14 +7,133 @@ Emitters are functions that receive MetricEvent objects and handle them
 
 import asyncio
 import logging
+import os
+import sys
 from collections.abc import Callable
 from datetime import datetime
 from threading import Lock, Timer
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from .types import MetricEmitter, MetricEvent
 
 logger = logging.getLogger(__name__)
+
+# Log level mapping
+_LEVEL_MAP = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
+
+
+def _get_log_level_from_env() -> int:
+    """Get log level from ADEN_LOG_LEVEL environment variable."""
+    env_level = os.environ.get("ADEN_LOG_LEVEL", "info").lower()
+    return _LEVEL_MAP.get(env_level, logging.INFO)
+
+
+def _setup_aden_logger() -> None:
+    """Set up the aden logger with default configuration based on env var."""
+    aden_logger = logging.getLogger("aden")
+
+    # Only set up if not already configured
+    if not aden_logger.handlers:
+        log_level = _get_log_level_from_env()
+        aden_logger.setLevel(log_level)
+
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+        aden_logger.addHandler(handler)
+
+        # Prevent propagation to root logger (avoids duplicate logs)
+        aden_logger.propagate = False
+
+
+# Auto-configure on import
+_setup_aden_logger()
+
+
+def configure_logging(
+    level: Literal["debug", "info", "warning", "error"] | None = None,
+    metrics_level: Literal["debug", "info", "warning", "error"] | None = None,
+    format: str | None = None,
+) -> None:
+    """
+    Configure Aden logging with appropriate log levels.
+
+    Log levels by logger:
+    - `aden`: Main logger for connection status, warnings, errors
+    - `aden.metrics`: Metric output (when using `use_logging=True` in console emitter)
+
+    Args:
+        level: Log level for the main `aden` logger.
+               If not specified, reads from ADEN_LOG_LEVEL env var (default: "info").
+               "debug" - All logs including detailed flush info
+               "info" - Connection status, SDK instrumentation (default)
+               "warning" - Only warnings and errors
+               "error" - Only errors
+        metrics_level: Log level for the `aden.metrics` logger.
+                       Defaults to same as `level`.
+                       Use "debug" to see detailed metric output.
+        format: Custom log format. Defaults to "[%(levelname)s] %(name)s: %(message)s"
+
+    Environment Variables:
+        ADEN_LOG_LEVEL: Set default log level ("debug", "info", "warning", "error")
+
+    Example:
+        ```python
+        # Using environment variable (recommended for production)
+        # export ADEN_LOG_LEVEL=warning
+
+        # Or programmatically:
+        from aden import configure_logging, instrument, MeterOptions, create_console_emitter
+
+        # Enable verbose logging for debugging
+        configure_logging(level="debug", metrics_level="debug")
+
+        # Or just show warnings and errors
+        configure_logging(level="warning")
+
+        # Use logging-based console emitter
+        instrument(MeterOptions(
+            emit_metric=create_console_emitter(use_logging=True),
+        ))
+        ```
+
+    Note:
+        This function configures Python's logging module. If you have your own
+        logging configuration, you can skip this and configure the `aden` and
+        `aden.metrics` loggers directly.
+    """
+    # Get level from param or env var
+    if level is None:
+        log_level = _get_log_level_from_env()
+    else:
+        log_level = _LEVEL_MAP.get(level, logging.INFO)
+
+    metrics_log_level = _LEVEL_MAP.get(metrics_level, log_level) if metrics_level else log_level
+    log_format = format or "[%(levelname)s] %(name)s: %(message)s"
+
+    # Configure main aden logger
+    aden_logger = logging.getLogger("aden")
+    aden_logger.setLevel(log_level)
+
+    # Configure metrics logger
+    metrics_logger = logging.getLogger("aden.metrics")
+    metrics_logger.setLevel(metrics_log_level)
+
+    # Update or add handler
+    if aden_logger.handlers:
+        aden_logger.handlers[0].setFormatter(logging.Formatter(log_format))
+    else:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter(log_format))
+        aden_logger.addHandler(handler)
+
+    # Prevent propagation to root logger (avoids duplicate logs)
+    aden_logger.propagate = False
+    metrics_logger.propagate = True  # Propagate to aden logger
 
 T = TypeVar("T")
 
@@ -22,6 +141,7 @@ T = TypeVar("T")
 def create_console_emitter(
     level: str = "info",
     pretty: bool = True,
+    use_logging: bool = False,
 ) -> MetricEmitter:
     """
     A simple console emitter for development/debugging.
@@ -29,10 +149,13 @@ def create_console_emitter(
     Args:
         level: Log level - "info" logs all events, "warn" logs only errors
         pretty: Whether to pretty-print the output
+        use_logging: If True, use Python logging instead of print().
+                     Metrics are logged at DEBUG level, errors at WARNING.
 
     Returns:
         A metric emitter function
     """
+    metric_logger = logging.getLogger("aden.metrics")
 
     def emit(event: MetricEvent) -> None:
         if level == "warn" and not event.error:
@@ -41,6 +164,7 @@ def create_console_emitter(
         prefix = "X" if event.error else "+"
         summary_parts = [
             f"{prefix} [{event.trace_id[:8]}]",
+            event.provider,
             event.model,
             "(stream)" if event.stream else "",
             f"{event.latency_ms:.0f}ms",
@@ -48,22 +172,32 @@ def create_console_emitter(
         summary = " ".join(filter(None, summary_parts))
 
         if pretty and event.total_tokens > 0:
-            print(summary)
-            print(f"  tokens: {event.input_tokens} in / {event.output_tokens} out")
+            lines = [summary]
+            lines.append(f"  tokens: {event.input_tokens} in / {event.output_tokens} out")
             if event.cached_tokens > 0:
-                print(f"  cached: {event.cached_tokens}")
+                lines.append(f"  cached: {event.cached_tokens}")
             if event.reasoning_tokens > 0:
-                print(f"  reasoning: {event.reasoning_tokens}")
+                lines.append(f"  reasoning: {event.reasoning_tokens}")
             if event.tool_names:
-                print(f"  tools: {event.tool_names}")
+                lines.append(f"  tools: {event.tool_names}")
             if event.agent_stack:
-                print(f"  agent: {' > '.join(event.agent_stack)}")
+                lines.append(f"  agent: {' > '.join(event.agent_stack)}")
             if event.call_site_file and event.call_site_line:
-                print(f"  call_site: {event.call_site_file}:{event.call_site_line}")
+                lines.append(f"  call_site: {event.call_site_file}:{event.call_site_line}")
             if event.error:
-                print(f"  error: {event.error}")
+                lines.append(f"  error: {event.error}")
+
+            output = "\n".join(lines)
         else:
-            print(summary)
+            output = summary
+
+        if use_logging:
+            if event.error:
+                metric_logger.warning(output)
+            else:
+                metric_logger.debug(output)
+        else:
+            print(output)
 
     return emit
 

@@ -95,6 +95,7 @@ from .normalize import (
 
 # Emitters
 from .emitters import (
+    configure_logging,
     create_console_emitter,
     create_batch_emitter,
     create_multi_emitter,
@@ -175,6 +176,8 @@ __all__ = [
     "normalize_gemini_usage",
     "empty_usage",
     "merge_usage",
+    # Logging
+    "configure_logging",
     # Emitters
     "create_console_emitter",
     "create_batch_emitter",
