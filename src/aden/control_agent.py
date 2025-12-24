@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -75,6 +76,12 @@ class ControlAgent(IControlAgent):
         # Event queue for offline buffering
         self._event_queue: list[ServerEvent] = []
         self._max_queue_size = 1000
+        self._sync_batch_size = 10  # Flush sync events after this many are queued
+        self._sync_flush_interval = 1.0  # Flush sync events every second
+
+        # Background thread for sync flushing
+        self._sync_flush_thread: threading.Thread | None = None
+        self._sync_flush_stop = threading.Event()
 
         # Stats
         self._requests_since_heartbeat = 0
@@ -320,8 +327,25 @@ class ControlAgent(IControlAgent):
         self._requests_since_heartbeat = 0
         self._errors_since_heartbeat = 0
 
+    def disconnect_sync(self) -> None:
+        """Disconnect from the control server (sync version)."""
+        # Stop the background flush thread (which also does final flush)
+        self._stop_sync_flush_thread()
+
+        self._stop_polling()
+        self._stop_heartbeat()
+
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
+
+        self._connected = False
+
     async def disconnect(self) -> None:
         """Disconnect from the control server."""
+        # Flush any remaining events
+        await self._flush_event_queue()
+
         self._stop_polling()
         self._stop_heartbeat()
 
@@ -551,8 +575,95 @@ class ControlAgent(IControlAgent):
 
         return {"exceeded": info["count"] > limit, "count": info["count"]}
 
+    def _http_request_sync(
+        self, path: str, method: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Make synchronous HTTP request to server using urllib."""
+        import urllib.request
+        import urllib.error
+
+        http_url = (
+            self.options.server_url.replace("wss://", "https://").replace(
+                "ws://", "http://"
+            )
+        )
+
+        try:
+            data = json.dumps(body).encode("utf-8") if body else None
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.options.api_key}",
+                "X-SDK-Instance-ID": self.options.instance_id or "",
+            }
+
+            req = urllib.request.Request(
+                f"{http_url}{path}",
+                data=data,
+                headers=headers,
+                method=method,
+            )
+
+            with urllib.request.urlopen(req, timeout=self.options.timeout_ms / 1000) as resp:
+                if resp.status == 200:
+                    return {"ok": True, "data": json.loads(resp.read().decode())}
+                return {"ok": False, "status": resp.status}
+
+        except urllib.error.HTTPError as e:
+            logger.warning(f"[aden] HTTP error {e.code} on {path}")
+            return {"ok": False, "status": e.code}
+        except Exception as e:
+            logger.warning(f"[aden] HTTP request failed: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def _flush_event_queue_sync(self) -> None:
+        """Flush queued events synchronously via HTTP."""
+        if not self._event_queue:
+            return
+
+        try:
+            events = self._event_queue.copy()
+            self._event_queue.clear()
+            self._http_request_sync(
+                "/v1/control/events",
+                "POST",
+                {"events": [asdict(e) for e in events]},
+            )
+        except Exception as e:
+            logger.warning(f"[aden] Failed to flush event queue sync: {e}")
+
+    def _start_sync_flush_thread(self) -> None:
+        """Start the background thread for periodic sync flushing."""
+        if self._sync_flush_thread is not None:
+            return
+
+        def flush_loop() -> None:
+            while not self._sync_flush_stop.wait(timeout=self._sync_flush_interval):
+                self._flush_event_queue_sync()
+            # Final flush on stop
+            self._flush_event_queue_sync()
+
+        self._sync_flush_thread = threading.Thread(target=flush_loop, daemon=True)
+        self._sync_flush_thread.start()
+
+    def _stop_sync_flush_thread(self) -> None:
+        """Stop the background flush thread."""
+        if self._sync_flush_thread is None:
+            return
+
+        self._sync_flush_stop.set()
+        self._sync_flush_thread.join(timeout=2.0)
+        self._sync_flush_thread = None
+        self._sync_flush_stop.clear()
+
     def report_metric_sync(self, event: MetricEvent) -> None:
-        """Report a metric event to the server (sync version - queues for background send)."""
+        """Report a metric event to the server (sync version).
+
+        Uses background thread for periodic flushing + batch size threshold.
+        """
+        # Start background flush thread on first use
+        self._start_sync_flush_thread()
+
         # Inject context_id into metadata
         context_id = (
             self.options.get_context_id() if self.options.get_context_id else None
@@ -569,8 +680,11 @@ class ControlAgent(IControlAgent):
             data=event,
         )
 
-        # Queue the event for later sending (will be flushed by heartbeat or next async call)
+        # Queue event - background thread flushes every second
+        # Also flush immediately if batch size is reached
         self._queue_event(wrapper)
+        if len(self._event_queue) >= self._sync_batch_size:
+            self._flush_event_queue_sync()
 
         # Update local budget tracking
         if self._cached_policy and self._cached_policy.budgets:

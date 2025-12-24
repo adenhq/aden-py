@@ -423,14 +423,7 @@ def uninstrument() -> None:
 
     # Disconnect control agent if connected
     if _global_control_agent:
-        try:
-            loop = asyncio.get_running_loop()
-            logger.warning(
-                "[aden] Control agent connected in async context. "
-                "Use uninstrument_async() for proper cleanup."
-            )
-        except RuntimeError:
-            asyncio.run(_global_control_agent.disconnect())
+        _global_control_agent.disconnect_sync()
         _global_control_agent = None
 
     uninstrument_openai()

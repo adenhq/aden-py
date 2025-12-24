@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aden-py"
-version = "0.2.1"
+version = "0.2.3"
 description = "Multi-provider LLM SDK metering - OpenAI, Anthropic, Gemini - usage tracking, budget enforcement, and cost control"
 readme = "README.md"
 license = "MIT"
@@ -24,8 +24,10 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
-# No required dependencies - all providers are optional
-dependencies = []
+# Core dependencies for control agent HTTP transport
+dependencies = [
+    "aiohttp>=3.8.0",
+]
 
 [project.optional-dependencies]
 # Individual provider support
