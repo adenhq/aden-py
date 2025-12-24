@@ -155,35 +155,6 @@ async def _execute_before_request_hook(
         await asyncio.sleep(result.delay_ms / 1000)
 
 
-def _run_coroutine_sync(coro: Any) -> Any:
-    """Run a coroutine from sync context, handling Python 3.10+ event loop changes."""
-    try:
-        # Try to get the running loop first - if one exists, we're in async context
-        asyncio.get_running_loop()
-        # If we get here, we're in an async context - can't use run_until_complete
-        raise RuntimeError(
-            "Cannot call sync metering methods from async context. "
-            "Use AsyncOpenAI client instead, or call from a sync context."
-        )
-    except RuntimeError as e:
-        # No running loop - this is the expected case for sync code
-        if "no running event loop" not in str(e).lower():
-            raise  # Re-raise if it's a different RuntimeError
-
-    try:
-        # Python 3.10+: get_event_loop() may raise if no loop exists
-        # Use asyncio.run() which creates a new loop and closes it properly
-        return asyncio.run(coro)
-    except RuntimeError as e:
-        # Fallback for edge cases (e.g., nested event loops in some environments)
-        if "cannot be called from a running event loop" in str(e):
-            raise RuntimeError(
-                "Cannot call sync metering methods from async context. "
-                "Use AsyncOpenAI client instead."
-            ) from e
-        raise
-
-
 def _execute_before_request_hook_sync(
     params: dict[str, Any],
     context: BeforeRequestContext,
@@ -195,7 +166,9 @@ def _execute_before_request_hook_sync(
 
     result = options.before_request(params, context)
     if asyncio.iscoroutine(result):
-        result = _run_coroutine_sync(result)
+        # Close the unawaited coroutine to prevent warnings
+        result.close()
+        return
 
     if result.action == BeforeRequestAction.CANCEL:
         raise RequestCancelledError(result.reason, context)
@@ -272,7 +245,8 @@ def _emit_metric_sync(event: MetricEvent, options: MeterOptions) -> None:
     try:
         result = options.emit_metric(event)
         if asyncio.iscoroutine(result):
-            result = _run_coroutine_sync(result)
+            # Close the unawaited coroutine to prevent warnings
+            result.close()
     except Exception as e:
         _handle_emit_error(event, e, options)
 

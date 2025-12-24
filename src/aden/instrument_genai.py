@@ -128,7 +128,8 @@ def _emit_metric_sync(event: MetricEvent, options: MeterOptions) -> None:
     try:
         result = options.emit_metric(event)
         if asyncio.iscoroutine(result):
-            logger.warning("Async emitter used in sync context - metric may be lost")
+            # Close the unawaited coroutine to prevent warnings
+            result.close()
     except Exception as e:
         if options.on_emit_error:
             options.on_emit_error(event, e)
@@ -194,8 +195,10 @@ def _create_sync_wrapper(
             try:
                 result = options.before_request(kwargs, context)
                 if asyncio.iscoroutine(result):
-                    logger.warning("Async before_request hook used in sync context - skipping")
-                elif result:
+                    # Close the unawaited coroutine to prevent warnings
+                    result.close()
+                    result = None
+                if result:
                     if result.action == BeforeRequestAction.CANCEL:
                         raise RequestCancelledError(result.reason or "Request cancelled", context)
                     elif result.action == BeforeRequestAction.DEGRADE and result.to_model:

@@ -335,8 +335,8 @@ class ControlAgent(IControlAgent):
 
         self._connected = False
 
-    async def get_decision(self, request: ControlRequest) -> ControlDecision:
-        """Get a control decision for a request."""
+    def get_decision_sync(self, request: ControlRequest) -> ControlDecision:
+        """Get a control decision for a request (sync version)."""
         self._requests_since_heartbeat += 1
 
         # If no policy, use default based on fail_open
@@ -351,6 +351,10 @@ class ControlAgent(IControlAgent):
             )
 
         return self._evaluate_policy(request, self._cached_policy)
+
+    async def get_decision(self, request: ControlRequest) -> ControlDecision:
+        """Get a control decision for a request (async version)."""
+        return self.get_decision_sync(request)
 
     def _evaluate_policy(
         self, request: ControlRequest, policy: ControlPolicy
@@ -546,6 +550,37 @@ class ControlAgent(IControlAgent):
         self._request_counts[key] = info
 
         return {"exceeded": info["count"] > limit, "count": info["count"]}
+
+    def report_metric_sync(self, event: MetricEvent) -> None:
+        """Report a metric event to the server (sync version - queues for background send)."""
+        # Inject context_id into metadata
+        context_id = (
+            self.options.get_context_id() if self.options.get_context_id else None
+        )
+        if context_id and event.metadata is None:
+            event.metadata = {"context_id": context_id}
+        elif context_id:
+            event.metadata["context_id"] = context_id
+
+        wrapper = MetricEventWrapper(
+            event_type="metric",
+            timestamp=datetime.now().isoformat(),
+            sdk_instance_id=self.options.instance_id or "",
+            data=event,
+        )
+
+        # Queue the event for later sending (will be flushed by heartbeat or next async call)
+        self._queue_event(wrapper)
+
+        # Update local budget tracking
+        if self._cached_policy and self._cached_policy.budgets:
+            if event.total_tokens > 0:
+                estimated_cost = self._estimate_cost(event)
+                if context_id:
+                    for budget in self._cached_policy.budgets:
+                        if budget.context_id == context_id:
+                            budget.current_spend_usd += estimated_cost
+                            break
 
     async def report_metric(self, event: MetricEvent) -> None:
         """Report a metric event to the server."""

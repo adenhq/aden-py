@@ -165,8 +165,8 @@ def _emit_metric_sync(event: MetricEvent, options: MeterOptions) -> None:
     try:
         result = options.emit_metric(event)
         if asyncio.iscoroutine(result):
-            # Can't run async in sync context - just skip
-            logger.warning("Async emitter used in sync context - metric may be lost")
+            # Close the unawaited coroutine to prevent warnings
+            result.close()
     except Exception as e:
         if options.on_emit_error:
             options.on_emit_error(event, e)
@@ -201,8 +201,8 @@ def _execute_before_request_hook_sync(
 
     result = options.before_request(params, context)
     if asyncio.iscoroutine(result):
-        # Can't run async hook in sync context
-        logger.warning("Async before_request hook used in sync context - skipping")
+        # Close the unawaited coroutine to prevent warnings
+        result.close()
         return BeforeRequestResult.proceed()
 
     return result

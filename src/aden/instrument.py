@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from .control_agent import ControlAgent, create_control_agent, create_control_agent_emitter
+from .control_agent import ControlAgent, create_control_agent
 from .control_types import (
     ControlAction,
     ControlAgentOptions,
@@ -64,36 +64,39 @@ class InstrumentationResultWithAgent(InstrumentationResult):
 
 
 def _create_control_before_request_hook(
-    control_agent: IControlAgent,
+    control_agent: "ControlAgent",
     get_context_id: Callable[[], str | None] | None = None,
     user_hook: Callable[..., Any] | None = None,
-) -> Callable[[dict[str, Any], BeforeRequestContext], Awaitable[BeforeRequestResult]]:
+) -> Callable[[dict[str, Any], BeforeRequestContext], BeforeRequestResult]:
     """
     Creates a beforeRequest hook that integrates with the control agent
     to enforce budget limits, throttling, and model degradation.
+
+    This hook is sync-compatible - it uses the sync version of get_decision
+    which just reads from the cached policy (no network calls).
     """
 
-    async def hook(
+    def hook(
         params: dict[str, Any], context: BeforeRequestContext
     ) -> BeforeRequestResult:
         # First, call user's hook if provided
         if user_hook:
             user_result = user_hook(params, context)
+            # If user provided an async hook, we can't handle it here
             if asyncio.iscoroutine(user_result):
-                user_result = await user_result
+                logger.warning("[aden] Async user hook not supported with control agent - skipping")
+                user_result = None
 
-            if user_result.action == BeforeRequestAction.CANCEL:
-                return user_result
-            if user_result.action == BeforeRequestAction.THROTTLE:
-                # Apply user's throttle, but continue to check control agent
-                await asyncio.sleep(user_result.delay_ms / 1000)
-            if user_result.action == BeforeRequestAction.DEGRADE:
-                # User's degrade takes precedence
-                return user_result
+            if user_result:
+                if user_result.action == BeforeRequestAction.CANCEL:
+                    return user_result
+                if user_result.action == BeforeRequestAction.DEGRADE:
+                    # User's degrade takes precedence
+                    return user_result
 
-        # Get decision from control agent
+        # Get decision from control agent (sync - just reads cached policy)
         context_id = get_context_id() if get_context_id else None
-        decision = await control_agent.get_decision(
+        decision = control_agent.get_decision_sync(
             ControlRequest(
                 context_id=context_id,
                 provider="openai",  # TODO: detect provider from context
@@ -133,6 +136,36 @@ def _create_control_before_request_hook(
     return hook
 
 
+def _create_sync_compatible_emitter(
+    control_agent: "ControlAgent",
+    original_emitter: Callable[..., Any] | None = None,
+) -> Callable[[MetricEvent], None]:
+    """
+    Creates a sync-compatible emitter that works in both sync and async contexts.
+
+    - In sync context: queues metrics for background sending
+    - In async context: sends metrics immediately
+    """
+
+    def emitter(event: MetricEvent) -> None:
+        # Send to control agent (sync - just queues)
+        control_agent.report_metric_sync(event)
+
+        # Call original emitter if provided
+        if original_emitter:
+            result = original_emitter(event)
+            if asyncio.iscoroutine(result):
+                # Try to schedule in existing loop, otherwise just close it
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(result)
+                except RuntimeError:
+                    # No running loop - close the coroutine
+                    result.close()
+
+    return emitter
+
+
 async def _resolve_options(options: MeterOptions) -> MeterOptions:
     """
     Resolve options by setting up control agent when api_key is provided.
@@ -159,25 +192,10 @@ async def _resolve_options(options: MeterOptions) -> MeterOptions:
         await control_agent.connect()
         _global_control_agent = control_agent
 
-        # Create emitter that sends to control agent
-        control_emitter = create_control_agent_emitter(control_agent)
+        # Create sync-compatible emitter
+        emit_metric = _create_sync_compatible_emitter(control_agent, options.emit_metric)
 
-        # Combine with user's emitter if provided
-        if options.emit_metric:
-            original_emitter = options.emit_metric
-
-            async def combined_emitter(event: MetricEvent) -> None:
-                # Run both emitters
-                result1 = original_emitter(event)
-                if asyncio.iscoroutine(result1):
-                    await result1
-                await control_emitter(event)
-
-            emit_metric = combined_emitter
-        else:
-            emit_metric = control_emitter
-
-        # Create beforeRequest hook that checks with control agent
+        # Create beforeRequest hook that checks with control agent (sync)
         before_request = _create_control_before_request_hook(
             control_agent,
             options.get_context_id,

@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "aden"
-version = "0.2.0"
+name = "aden-py"
+version = "0.2.1"
 description = "Multi-provider LLM SDK metering - OpenAI, Anthropic, Gemini - usage tracking, budget enforcement, and cost control"
 readme = "README.md"
 license = "MIT"
