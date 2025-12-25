@@ -5,11 +5,12 @@
 Aden automatically tracks every LLM API call in your application—usage, latency, costs—and gives you real-time controls to prevent budget overruns. Works with OpenAI, Anthropic, and Google Gemini.
 
 ```python
-from aden import instrument, MeterOptions, create_console_emitter
+import os
+from aden import instrument, MeterOptions
 from openai import OpenAI
 
 # One line to start tracking everything
-instrument(MeterOptions(emit_metric=create_console_emitter()))
+instrument(MeterOptions(api_key=os.environ["ADEN_API_KEY"]))
 
 # Use your SDK normally - metrics collected automatically
 client = OpenAI()
@@ -26,7 +27,8 @@ response = client.chat.completions.create(
 - [Why Aden?](#why-aden)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Sending Metrics to Your Backend](#sending-metrics-to-your-backend)
+- [Local Testing (Console Emitter)](#local-testing-console-emitter)
+- [Custom Metric Handlers](#custom-metric-handlers)
 - [Cost Control](#cost-control)
 - [Multi-Provider Support](#multi-provider-support)
 - [What Metrics Are Collected?](#what-metrics-are-collected)
@@ -84,21 +86,31 @@ pip install aden[livekit]      # LiveKit voice agents
 
 ## Quick Start
 
-### Step 1: Add Instrumentation
+### Step 1: Set Your API Key
+
+Add the following to your shell configuration file (`~/.bashrc` for bash or `~/.zshrc` for zsh):
+
+```bash
+export ADEN_API_KEY="your-api-key"
+export ADEN_API_URL="https://your-aden-server.com"  # Optional: defaults to Aden cloud
+```
+
+Then reload your shell or run `source ~/.bashrc` (or `source ~/.zshrc`).
+
+### Step 2: Add Instrumentation
 
 Add this **once** at your application startup (before creating any LLM clients):
 
 ```python
-from aden import instrument, MeterOptions, create_console_emitter
+import os
+from aden import instrument, MeterOptions
 
-instrument(MeterOptions(
-    emit_metric=create_console_emitter(pretty=True),
-))
+instrument(MeterOptions(api_key=os.environ["ADEN_API_KEY"]))
 ```
 
-### Step 2: Use Your SDK Normally
+### Step 3: Use Your SDK Normally
 
-That's it! Every API call is now tracked:
+That's it! Every API call is now tracked and sent to the Aden server:
 
 ```python
 from openai import OpenAI
@@ -109,13 +121,10 @@ response = client.chat.completions.create(
     model="gpt-4o",
     messages=[{"role": "user", "content": "Explain quantum computing"}],
 )
-
-# Console output:
-# + [a1b2c3d4] openai gpt-4o 1234ms
-#   tokens: 12 in / 247 out
+# Metrics automatically sent: model, tokens, latency, cost
 ```
 
-### Step 3: Clean Up on Shutdown
+### Step 4: Clean Up on Shutdown
 
 ```python
 from aden import uninstrument
@@ -126,11 +135,27 @@ uninstrument()
 
 ---
 
-## Sending Metrics to Your Backend
+## Local Testing (Console Emitter)
 
-For production, send metrics to your backend instead of the console:
+For local development and testing without a server connection, use the console emitter:
 
-### Option A: Custom Handler
+```python
+from aden import instrument, MeterOptions, create_console_emitter
+
+instrument(MeterOptions(
+    emit_metric=create_console_emitter(pretty=True),
+))
+
+# Console output:
+# + [a1b2c3d4] openai gpt-4o 1234ms
+#   tokens: 12 in / 247 out
+```
+
+---
+
+## Custom Metric Handlers
+
+For advanced use cases, you can create custom metric handlers:
 
 ```python
 import httpx
@@ -142,8 +167,8 @@ async def http_emitter(event):
             json={
                 "trace_id": event.trace_id,
                 "model": event.model,
-                "input_tokens": event.usage.input_tokens if event.usage else 0,
-                "output_tokens": event.usage.output_tokens if event.usage else 0,
+                "input_tokens": event.input_tokens,
+                "output_tokens": event.output_tokens,
                 "latency_ms": event.latency_ms,
                 "error": event.error,
             },
@@ -152,22 +177,6 @@ async def http_emitter(event):
 
 instrument(MeterOptions(emit_metric=http_emitter))
 ```
-
-### Option B: Aden Control Server
-
-For real-time cost control (budgets, throttling, model degradation), connect to an Aden control server:
-
-```python
-import os
-from aden import instrument, MeterOptions
-
-instrument(MeterOptions(
-    api_key=os.environ["ADEN_API_KEY"],
-    server_url=os.environ.get("ADEN_API_URL"),
-))
-```
-
-This enables all the [Cost Control](#cost-control) features described below.
 
 ---
 
@@ -226,12 +235,11 @@ instrument(MeterOptions(
 Aden works with all major LLM providers. Instrumentation automatically detects available SDKs:
 
 ```python
-from aden import instrument, MeterOptions, create_console_emitter
+import os
+from aden import instrument, MeterOptions
 
 # Instrument all available providers at once
-result = instrument(MeterOptions(
-    emit_metric=create_console_emitter(pretty=True),
-))
+result = instrument(MeterOptions(api_key=os.environ["ADEN_API_KEY"]))
 
 print(f"OpenAI: {result.openai}")
 print(f"Anthropic: {result.anthropic}")
@@ -348,7 +356,7 @@ from aden import (
 )
 ```
 
-### Console Emitter (Development)
+### Console Emitter (Local Testing Only)
 
 ```python
 instrument(MeterOptions(
@@ -420,12 +428,12 @@ instrument(MeterOptions(emit_metric=my_emitter))
 
 ```python
 instrument(MeterOptions(
-    # === Metrics Destination ===
-    emit_metric=my_emitter,           # Required unless api_key is set
+    # === Primary: Aden Server (recommended for production) ===
+    api_key="aden_xxx",               # Your Aden API key (enables metrics + cost control)
+    server_url="https://...",         # Control server URL (optional, uses default if not set)
 
-    # === Control Server (enables cost control) ===
-    api_key="aden_xxx",               # Your Aden API key
-    server_url="https://...",         # Control server URL (optional)
+    # === Alternative: Custom Emitter (local testing or custom backends) ===
+    emit_metric=my_emitter,           # Custom handler for metrics
 
     # === Context Tracking ===
     get_context_id=lambda: get_user_id(),  # For per-user budgets
@@ -738,9 +746,9 @@ async def main():
 asyncio.run(main())
 ```
 
-### Without API Key (Local Only)
+### Without API Key (Local Testing Only)
 
-If you're **not** using the control server (no `api_key`), you can use `instrument()` from any context:
+For local testing without a server connection, you can use `instrument()` from any context:
 
 ```python
 from aden import instrument, uninstrument, MeterOptions, create_console_emitter
@@ -754,7 +762,7 @@ instrument(MeterOptions(
 uninstrument()
 ```
 
-This is because without an API key, no async connections need to be established.
+This is because without an API key, no async connections need to be established. For production use, always configure an API key to send metrics to the server.
 
 ### How Metrics Are Sent
 
@@ -869,8 +877,10 @@ Run examples with `python examples/<name>.py`:
    pip install openai anthropic google-generativeai
    ```
 
-3. **Verify emitter is working**: Test with console emitter first
+3. **Verify instrumentation is working**: Test with console emitter for local debugging
    ```python
+   from aden import create_console_emitter
+
    instrument(MeterOptions(
        emit_metric=create_console_emitter(pretty=True),
    ))
