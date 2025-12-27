@@ -721,11 +721,12 @@ class ControlAgent(IControlAgent):
         remaining = max(0, limit - current_spend)
 
         # HARD LIMIT CHECK: Block if exceeding max allowed overspend
-        # This catches runaway spending even under concurrency
-        hard_limit_decision = self._check_hard_limit(usage_percent, projected_percent)
-        if hard_limit_decision:
-            hard_limit_decision.budget_id = budget.id
-            return hard_limit_decision
+        # Only applies when budget action is BLOCK - degrade/throttle budgets don't need hard limits
+        if budget.action_on_exceed == ControlAction.BLOCK:
+            hard_limit_decision = self._check_hard_limit(usage_percent, projected_percent)
+            if hard_limit_decision:
+                hard_limit_decision.budget_id = budget.id
+                return hard_limit_decision
 
         # HYBRID ENFORCEMENT: Check if we should validate with server
         # Uses adaptive thresholds + probabilistic sampling
