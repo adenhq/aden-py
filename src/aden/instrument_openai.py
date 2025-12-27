@@ -294,6 +294,7 @@ class MeteredAsyncStream:
         t0: float,
         options: MeterOptions,
         stack_info: CallStackInfo | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self._original_stream = stream  # Keep reference to original for context manager
         self._iterator: AsyncIterator[Any] | None = None
@@ -303,6 +304,7 @@ class MeteredAsyncStream:
         self._t0 = t0
         self._options = options
         self._stack_info = stack_info
+        self._metadata = metadata
         self._final_usage: NormalizedUsage | None = None
         self._request_id: str | None = None
         self._tool_names: list[str] = []
@@ -393,6 +395,7 @@ class MeteredAsyncStream:
             tool_names=tool_names_str,
             error=self._error,
             stack_info=self._stack_info,
+            metadata=self._metadata,
         )
         await _emit_metric(event, self._options)
 
@@ -409,6 +412,7 @@ class MeteredSyncStream:
         t0: float,
         options: MeterOptions,
         stack_info: CallStackInfo | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self._original_stream = stream  # Keep reference to original for context manager
         self._iterator: Iterator[Any] | None = None
@@ -418,6 +422,7 @@ class MeteredSyncStream:
         self._t0 = t0
         self._options = options
         self._stack_info = stack_info
+        self._metadata = metadata
         self._final_usage: NormalizedUsage | None = None
         self._request_id: str | None = None
         self._tool_names: list[str] = []
@@ -528,6 +533,7 @@ class MeteredSyncStream:
             tool_names=tool_names_str,
             error=self._error,
             stack_info=self._stack_info,
+            metadata=self._metadata,
         )
         _emit_metric_sync(event, self._options)
 
@@ -556,6 +562,13 @@ def _create_async_wrapper(
         # Capture call stack before making the request
         stack_info = capture_call_stack(skip_frames=3)
 
+        # Extract metadata from request params (e.g., extra_body.metadata)
+        # This enables multi-budget matching based on agent, tenant, etc.
+        request_metadata = params.get("metadata") or {}
+        extra_body = params.get("extra_body") or {}
+        if isinstance(extra_body, dict) and "metadata" in extra_body:
+            request_metadata = {**request_metadata, **extra_body["metadata"]}
+
         # Execute beforeRequest hook
         context = BeforeRequestContext(
             model=model,
@@ -583,7 +596,7 @@ def _create_async_wrapper(
 
             # Handle streaming
             if final_params.get("stream") and hasattr(response, "__aiter__"):
-                return MeteredAsyncStream(response, trace_id, span_id, model, t0, options, stack_info)
+                return MeteredAsyncStream(response, trace_id, span_id, model, t0, options, stack_info, request_metadata or None)
 
             # Handle raw response wrappers (LegacyAPIResponse, APIResponse) from with_raw_response
             # These wrappers contain HTTP metadata and need .parse() to get the actual response
@@ -618,6 +631,7 @@ def _create_async_wrapper(
                 tool_call_count=tool_count,
                 tool_names=tool_names,
                 stack_info=stack_info,
+                metadata=request_metadata or None,
             )
             await _emit_metric(event, options)
             return response
@@ -632,6 +646,7 @@ def _create_async_wrapper(
                 usage=None,
                 error=str(e),
                 stack_info=stack_info,
+                metadata=request_metadata or None,
             )
             await _emit_metric(event, options)
             raise
@@ -662,6 +677,13 @@ def _create_sync_wrapper(
         # Capture call stack before making the request
         stack_info = capture_call_stack(skip_frames=3)
 
+        # Extract metadata from request params (e.g., extra_body.metadata)
+        # This enables multi-budget matching based on agent, tenant, etc.
+        request_metadata = params.get("metadata") or {}
+        extra_body = params.get("extra_body") or {}
+        if isinstance(extra_body, dict) and "metadata" in extra_body:
+            request_metadata = {**request_metadata, **extra_body["metadata"]}
+
         context = BeforeRequestContext(
             model=model,
             stream=bool(params.get("stream")),
@@ -686,7 +708,7 @@ def _create_sync_wrapper(
             response = original_fn(self, **final_params) if kwargs else original_fn(self, final_params, *args[1:])
 
             if final_params.get("stream") and hasattr(response, "__iter__"):
-                return MeteredSyncStream(response, trace_id, span_id, model, t0, options, stack_info)
+                return MeteredSyncStream(response, trace_id, span_id, model, t0, options, stack_info, request_metadata or None)
 
             # Handle raw response wrappers (LegacyAPIResponse, APIResponse) from with_raw_response
             # These wrappers contain HTTP metadata and need .parse() to get the actual response
@@ -729,6 +751,7 @@ def _create_sync_wrapper(
                 tool_call_count=tool_count,
                 tool_names=tool_names,
                 stack_info=stack_info,
+                metadata=request_metadata or None,
             )
             _emit_metric_sync(event, options)
             return response
@@ -743,6 +766,7 @@ def _create_sync_wrapper(
                 usage=None,
                 error=str(e),
                 stack_info=stack_info,
+                metadata=request_metadata or None,
             )
             _emit_metric_sync(event, options)
             raise

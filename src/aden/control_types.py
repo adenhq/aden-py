@@ -186,10 +186,22 @@ ServerEvent = ControlEvent | MetricEventWrapper | HeartbeatEvent | ErrorEvent
 
 @dataclass
 class BudgetRule:
-    """Budget rule - limits spend per context."""
+    """Budget rule - limits spend per context.
 
-    context_id: str
-    """Context ID this rule applies to (e.g., user_id, session_id)."""
+    The server returns budgets with type-based matching:
+    - global: Applies to all requests
+    - agent: Matches request.metadata.agent
+    - tenant: Matches request.metadata.tenant_id
+    - customer: Matches request.metadata.customer_id
+    - feature: Matches request.metadata.feature
+    - tag: Matches if any request.metadata.tags intersect with budget tags
+    """
+
+    id: str
+    """Unique budget ID from server."""
+
+    budget_type: str
+    """Budget type: global, agent, tenant, customer, feature, tag."""
 
     limit_usd: float
     """Budget limit in USD."""
@@ -200,8 +212,18 @@ class BudgetRule:
     action_on_exceed: ControlAction = ControlAction.BLOCK
     """Action to take when budget is exceeded."""
 
+    name: str | None = None
+    """Budget name (used for matching agent/tenant/customer/feature)."""
+
     degrade_to_model: str | None = None
     """If action is 'degrade', switch to this model."""
+
+    tags: list[str] | None = None
+    """Tags for tag-type budgets."""
+
+    # Legacy field for backwards compatibility
+    context_id: str | None = None
+    """Deprecated: Use budget_type and name for matching."""
 
 
 @dataclass
@@ -401,6 +423,109 @@ class ControlAgentOptions:
 
     on_alert: AlertCallback | None = None
     """Callback invoked when an alert is triggered."""
+
+    # Hybrid enforcement options
+    server_validation_threshold: float = 5.0
+    """Budget usage percentage at which to START considering server validation (0-100).
+    This is the base threshold - actual validation probability scales from here.
+    Set to 100 to disable server validation entirely. Default: 80%."""
+
+    server_validation_timeout_ms: int = 2000
+    """Timeout for server validation requests (ms). If validation times out,
+    behavior depends on fail_open setting. Default: 2000ms."""
+
+    enable_hybrid_enforcement: bool = True
+    """Enable hybrid enforcement mode. When enabled, requests approaching
+    budget limits will be validated with the server. Default: True."""
+
+    # Adaptive enforcement options (reduces latency impact at high budgets)
+    adaptive_threshold_enabled: bool = True
+    """Enable adaptive threshold calculation. When enabled, the validation
+    threshold adapts based on remaining budget and request volume.
+    This significantly reduces latency impact for high-budget scenarios.
+    Default: True."""
+
+    adaptive_min_remaining_usd: float = 5.0
+    """Minimum remaining budget (in USD) before forcing 100% validation rate.
+    When remaining budget drops below this, all requests are validated.
+    This provides a safety net regardless of percentage. Default: $5."""
+
+    sampling_enabled: bool = True
+    """Enable probabilistic sampling for server validation.
+    Instead of validating every request above threshold, only validate
+    a percentage of requests based on budget usage. This dramatically
+    reduces latency impact while maintaining statistical enforcement.
+    Default: True."""
+
+    sampling_base_rate: float = 0.1
+    """Base sampling rate at the validation threshold (0.0-1.0).
+    At 80% usage (default threshold), only 10% of requests are validated.
+    Rate increases as usage approaches 100%. Default: 0.1 (10%)."""
+
+    sampling_full_validation_percent: float = 95.0
+    """Usage percentage at which to validate 100% of requests.
+    Between threshold and this value, sampling rate interpolates.
+    Default: 95%."""
+
+    max_expected_overspend_percent: float = 5.0
+    """Maximum expected overspend as percentage of budget limit.
+    Used to calculate soft/hard limit boundaries. Requests are blocked
+    at (100 + this value)% to provide a hard stop. Default: 5%."""
+
+
+@dataclass
+class BudgetValidationRequest:
+    """Request payload for server-side budget validation."""
+
+    budget_id: str
+    """The budget ID to validate."""
+
+    estimated_cost: float
+    """Estimated cost of the pending request in USD."""
+
+    context_type: str | None = None
+    """Budget type: global, agent, tenant, customer, feature, tag."""
+
+    context_value: str | None = None
+    """Context value (agent name, tenant_id, etc.)."""
+
+    tags: list[str] | None = None
+    """Tags for tag-type budgets."""
+
+
+@dataclass
+class BudgetValidationResponse:
+    """Response from server-side budget validation."""
+
+    allowed: bool
+    """Whether the request should proceed."""
+
+    action: str
+    """Action to take: allow, block, degrade, throttle."""
+
+    authoritative_spend: float
+    """Server's authoritative spend value."""
+
+    budget_limit: float
+    """Budget limit for reference."""
+
+    usage_percent: float
+    """Current usage percentage."""
+
+    policy_version: str
+    """Current policy version for cache sync."""
+
+    updated_spend: float
+    """Updated spend to cache locally."""
+
+    reason: str | None = None
+    """Reason for the decision."""
+
+    projected_percent: float | None = None
+    """Projected usage percentage after this request."""
+
+    degrade_to_model: str | None = None
+    """Model to degrade to (if action is degrade)."""
 
 
 # =============================================================================

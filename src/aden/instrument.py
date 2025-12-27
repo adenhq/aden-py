@@ -96,11 +96,20 @@ def _create_control_before_request_hook(
 
         # Get decision from control agent (sync - just reads cached policy)
         context_id = get_context_id() if get_context_id else None
+
+        # Extract metadata from request params (e.g., extra_body.metadata)
+        # This enables multi-budget matching based on agent, tenant, etc.
+        request_metadata = params.get("metadata") or {}
+        extra_body = params.get("extra_body") or {}
+        if isinstance(extra_body, dict) and "metadata" in extra_body:
+            request_metadata = {**request_metadata, **extra_body["metadata"]}
+
         decision = control_agent.get_decision_sync(
             ControlRequest(
                 context_id=context_id,
                 provider="openai",  # TODO: detect provider from context
                 model=params.get("model", "unknown"),
+                metadata=request_metadata if request_metadata else None,
             )
         )
 

@@ -20,7 +20,6 @@ import asyncio
 import os
 import sys
 import time
-from datetime import datetime
 from typing import Any
 
 # Add parent directory to path for local development
@@ -47,16 +46,21 @@ from aden import (
 )
 
 USER_ID = "demo_user_control_actions"
+AGENT_NAME = "enterprise"  # Agent name for multi-budget demo
 API_KEY = os.environ.get("ADEN_API_KEY", "")
 SERVER_URL = os.environ.get("ADEN_API_URL", "http://localhost:8888")
-BUDGET_LIMIT = 0.002  # Must match the budget rule
+BUDGET_LIMIT = 0.0003  # Very tight limit to trigger blocking quickly
 
 # Track alerts received
 alerts_received: list[dict[str, Any]] = []
 
 
 async def setup_policy() -> None:
-    """Set up the control policy on the server."""
+    """Set up the control policy on the server.
+
+    Updates the global budget limit to a very small amount to demonstrate
+    control actions being triggered.
+    """
     print("=" * 60)
     print("Setting up control policy...")
     print("=" * 60 + "\n")
@@ -65,113 +69,100 @@ async def setup_policy() -> None:
         headers = {"Authorization": f"Bearer {API_KEY}"}
         json_headers = {**headers, "Content-Type": "application/json"}
 
-        # Clear existing policy
-        await client.delete(f"{SERVER_URL}/v1/control/policy", headers=headers)
-
-        # Reset budget
-        await client.post(
-            f"{SERVER_URL}/v1/control/budget/{USER_ID}/reset",
-            headers=headers,
-        )
-
-        # 1. Budget with $0.002 limit - small enough to trigger all thresholds
-        await client.post(
-            f"{SERVER_URL}/v1/control/policy/budgets",
-            headers=json_headers,
-            json={
-                "context_id": USER_ID,
-                "limit_usd": BUDGET_LIMIT,
-                "action_on_exceed": "block",
-            },
-        )
-        print("  Budget: $0.002 limit, block on exceed")
-
-        # 2. Throttle rule: 3 requests per minute
-        await client.post(
-            f"{SERVER_URL}/v1/control/policy/throttles",
-            headers=json_headers,
-            json={
-                "context_id": USER_ID,
-                "requests_per_minute": 3,
-                "delay_ms": 2000,
-            },
-        )
-        print("  Throttle: 3 req/min, 2s delay when exceeded")
-
-        # 3. Degradation rule: gpt-4o -> gpt-4o-mini at 50% budget
-        await client.post(
-            f"{SERVER_URL}/v1/control/policy/degradations",
-            headers=json_headers,
-            json={
-                "from_model": "gpt-4o",
-                "to_model": "gpt-4o-mini",
-                "trigger": "budget_threshold",
-                "threshold_percent": 50,
-                "context_id": USER_ID,
-            },
-        )
-        print("  Degradation: gpt-4o -> gpt-4o-mini at 50% budget")
-
-        # 4. Alert rule: Warn when any gpt-4* model is used
-        await client.post(
-            f"{SERVER_URL}/v1/control/policy/alerts",
-            headers=json_headers,
-            json={
-                "model_pattern": "gpt-4*",
-                "trigger": "model_usage",
-                "level": "warning",
-                "message": "Expensive model (gpt-4*) is being used",
-            },
-        )
-        print("  Alert: Warning when gpt-4* model is used")
-
-        # 5. Alert rule: Critical when budget > 80%
-        await client.post(
-            f"{SERVER_URL}/v1/control/policy/alerts",
-            headers=json_headers,
-            json={
-                "context_id": USER_ID,
-                "trigger": "budget_threshold",
-                "threshold_percent": 80,
-                "level": "critical",
-                "message": "Budget nearly exhausted (>80%)",
-            },
-        )
-        print("  Alert: Critical when budget > 80%\n")
-
-        # Get and display the full policy
+        # Get current policy to find global budget
         policy_res = await client.get(
             f"{SERVER_URL}/v1/control/policy",
             headers=headers,
         )
         policy = policy_res.json()
-        print("Full policy:")
+
+        # Find global budget and update its limit
+        global_budget = None
+        for budget in policy.get("budgets", []):
+            if budget.get("type") == "global":
+                global_budget = budget
+                break
+
+        if global_budget:
+            budget_id = global_budget.get("id")
+            current_spend = global_budget.get("spent", 0)
+            print(f"  Found global budget: {budget_id}")
+            print(f"  Current spend: ${current_spend:.6f}")
+
+            # Set limit to current_spend + $0.002 to trigger thresholds quickly
+            # This means we're already at ~90%+ usage
+            new_limit = current_spend + BUDGET_LIMIT
+            print(f"  Setting limit to: ${new_limit:.6f} (spend + ${BUDGET_LIMIT})")
+
+            # Update the budget in the policy via PUT
+            updated_budget = {**global_budget, "limit": new_limit, "limitAction": "kill"}
+            updated_budgets = [updated_budget] + [
+                b for b in policy.get("budgets", []) if b.get("type") != "global"
+            ]
+
+            update_res = await client.put(
+                f"{SERVER_URL}/v1/control/policies/default",
+                headers=json_headers,
+                json={"budgets": updated_budgets},
+            )
+            if update_res.status_code == 200:
+                print(f"  Updated global budget limit to ${new_limit:.6f}")
+            else:
+                print(f"  Failed to update budget: {update_res.status_code}")
+
+            # Calculate starting usage percentage
+            usage_pct = (current_spend / new_limit * 100) if new_limit > 0 else 0
+            print(f"  Starting at {usage_pct:.1f}% budget usage\n")
+        else:
+            print("  No global budget found in policy\n")
+
+        # Get and display the updated policy
+        policy_res = await client.get(
+            f"{SERVER_URL}/v1/control/policy",
+            headers=headers,
+        )
+        policy = policy_res.json()
+        print("Updated policy budgets:")
         import json
-        print(json.dumps(policy, indent=2))
+        for budget in policy.get("budgets", []):
+            if budget.get("type") == "global":
+                print(json.dumps(budget, indent=2))
 
 
 async def get_budget_status(debug: bool = False) -> dict[str, float]:
-    """Get current budget status from server.
+    """Get current budget status from policy.
 
-    Note: The server may not update 'spent' in real-time. Budget spend tracking
-    depends on server-side aggregation of metrics by context_id.
+    Gets the global budget from the policy, which is what the SDK uses for enforcement.
     """
     async with httpx.AsyncClient() as client:
         res = await client.get(
-            f"{SERVER_URL}/v1/control/budget/{USER_ID}",
+            f"{SERVER_URL}/v1/control/policy",
             headers={"Authorization": f"Bearer {API_KEY}"},
         )
         data = res.json()
+
+        # Find the global budget from the policy
+        budgets = data.get("budgets", [])
+        global_budget = None
+        for budget in budgets:
+            if budget.get("type") == "global":
+                global_budget = budget
+                break
+
+        if global_budget:
+            spend = global_budget.get("spent", 0)
+            limit = global_budget.get("limit", 0.07)
+            if debug:
+                print(f"   [DEBUG] Global budget: ${spend:.6f} / ${limit} ({(spend/limit*100) if limit > 0 else 0:.1f}%)")
+            return {
+                "spend": spend,
+                "limit": limit,
+                "percent": (spend / limit) * 100 if limit > 0 else 0,
+            }
+
         if debug:
-            print(f"   [DEBUG] Budget response: {data}")
-        # Server returns 'spent' for current spend
-        spend = data.get("spent", 0)
-        limit = data.get("limit", BUDGET_LIMIT)
-        return {
-            "spend": spend,
-            "limit": limit,
-            "percent": (spend / limit) * 100 if limit > 0 else 0,
-        }
+            print(f"   [DEBUG] No global budget found in policy")
+        return {"spend": 0, "limit": BUDGET_LIMIT, "percent": 0}
 
 
 def on_alert(alert: AlertEvent) -> None:
@@ -195,7 +186,7 @@ async def main() -> None:
         print("ADEN_API_KEY required")
         sys.exit(1)
 
-    await setup_policy()
+    # await setup_policy()
 
     # Instrument with alert handler
     print("\n" + "=" * 60)
@@ -238,10 +229,13 @@ async def main() -> None:
         start_time = time.time()
 
         try:
+            # Pass agent metadata to trigger multi-budget matching
+            # This will match both: global budget + enterprise agent budget
             response = await openai.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=20,
+                extra_body={"metadata": {"agent": AGENT_NAME}},
             )
 
             duration_ms = int((time.time() - start_time) * 1000)
@@ -291,11 +285,14 @@ async def main() -> None:
         print(f"  [{alert['level'].upper()}] {alert['message']}")
 
     print("\nControl Actions Demonstrated:")
-    print("  - allow: Requests 1-3 proceeded normally")
-    print("  - alert: Triggered for gpt-4* model usage")
-    print("  - throttle: Applied after 3 requests/min exceeded")
-    print("  - degrade: gpt-4o -> gpt-4o-mini after 50% budget")
-    print("  - block: Requests blocked after budget exceeded")
+    print("  - allow: Requests allowed when under budget")
+    print("  - block: Requests blocked when budget exceeded")
+    print("  - multi-budget: Both global + agent budgets validated")
+    print("")
+    print("Multi-Budget Validation:")
+    print(f"  - Requests used agent='{AGENT_NAME}' metadata")
+    print("  - This matches BOTH global budget AND enterprise agent budget")
+    print("  - Most restrictive decision is returned (if any budget blocks, request is blocked)")
 
     await uninstrument_async()
     print("\nDemo complete!\n")
