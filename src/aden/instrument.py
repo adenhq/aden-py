@@ -10,11 +10,13 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from .control_agent import ControlAgent, create_control_agent
 from .control_types import (
     ControlAction,
     ControlAgentOptions,
+    ControlEvent,
     ControlRequest,
     IControlAgent,
 )
@@ -104,14 +106,32 @@ def _create_control_before_request_hook(
         if isinstance(extra_body, dict) and "metadata" in extra_body:
             request_metadata = {**request_metadata, **extra_body["metadata"]}
 
+        model = params.get("model", "unknown")
+        provider = "openai"  # TODO: detect provider from context
+
         decision = control_agent.get_decision_sync(
             ControlRequest(
                 context_id=context_id,
-                provider="openai",  # TODO: detect provider from context
-                model=params.get("model", "unknown"),
+                provider=provider,
+                model=model,
                 metadata=request_metadata if request_metadata else None,
             )
         )
+
+        # Report control event to server for non-allow decisions
+        if decision.action != ControlAction.ALLOW:
+            control_event = ControlEvent(
+                trace_id=str(uuid4()),
+                span_id=str(uuid4()),
+                provider=provider,
+                original_model=model,
+                action=decision.action,
+                context_id=context_id,
+                reason=decision.reason,
+                degraded_to=decision.degrade_to_model,
+                throttle_delay_ms=decision.throttle_delay_ms,
+            )
+            control_agent.report_control_event_sync(control_event)
 
         # Map control decision to beforeRequest result
         if decision.action == ControlAction.BLOCK:
@@ -123,10 +143,10 @@ def _create_control_before_request_hook(
 
         if decision.action == ControlAction.DEGRADE:
             logger.info(
-                f"[aden] Model degraded: {params.get('model')} → {decision.degrade_to_model} ({decision.reason})"
+                f"[aden] Model degraded: {model} → {decision.degrade_to_model} ({decision.reason})"
             )
             return BeforeRequestResult.degrade(
-                to_model=decision.degrade_to_model or params.get("model", "unknown"),
+                to_model=decision.degrade_to_model or model,
                 reason=decision.reason or "",
                 delay_ms=decision.throttle_delay_ms or 0,
             )

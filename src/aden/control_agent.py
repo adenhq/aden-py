@@ -1415,6 +1415,23 @@ class ControlAgent(IControlAgent):
         event.sdk_instance_id = self.options.instance_id or ""
         await self._send_event(event)
 
+    def report_control_event_sync(self, event: ControlEvent) -> None:
+        """Report a control event to the server (sync version).
+
+        Uses background thread for batched sending, same as report_metric_sync.
+        """
+        # Start background flush thread on first use
+        self._start_sync_flush_thread()
+
+        event.event_type = "control"
+        event.timestamp = datetime.now().isoformat()
+        event.sdk_instance_id = self.options.instance_id or ""
+
+        # Queue event - background thread flushes periodically
+        self._queue_event(event)
+        if len(self._event_queue) >= self._sync_batch_size:
+            self._flush_event_queue_sync()
+
     async def report_error(
         self, message: str, error: Exception | None = None, trace_id: str | None = None
     ) -> None:

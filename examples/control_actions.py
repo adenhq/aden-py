@@ -186,7 +186,7 @@ async def main() -> None:
         print("ADEN_API_KEY required")
         sys.exit(1)
 
-    # await setup_policy()
+    await setup_policy()
 
     # Instrument with alert handler
     print("\n" + "=" * 60)
