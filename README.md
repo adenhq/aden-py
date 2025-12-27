@@ -182,50 +182,128 @@ instrument(MeterOptions(emit_metric=http_emitter))
 
 ## Cost Control
 
-Aden's cost control system lets you set budgets, throttle requests, and automatically downgrade to cheaper models—all in real-time.
+Aden's cost control system lets you set budgets, throttle requests, and automatically downgrade to cheaper models—all in real-time. When you provide an API key, the SDK automatically connects to the control server and enforces budgets configured on the server.
+
+### How It Works
+
+1. **SDK connects to control server** via WebSocket on startup
+2. **Server sends policy** with budgets, thresholds, and pricing
+3. **SDK enforces locally** using cached policy (no per-request latency)
+4. **Metrics sent to server** for spend tracking and visibility
+5. **Control events reported** when actions are taken (block, throttle, degrade, alert)
 
 ### Control Actions
-
-The control server can apply these actions to requests:
 
 | Action | What It Does | Use Case |
 |--------|--------------|----------|
 | **allow** | Request proceeds normally | Default when within limits |
-| **block** | Request is rejected with an error | Budget exhausted |
+| **block** | Request is rejected with `RequestCancelledError` | Budget exhausted |
 | **throttle** | Request is delayed before proceeding | Rate limiting |
 | **degrade** | Request uses a cheaper model | Approaching budget limit |
 | **alert** | Request proceeds, notification sent | Warning threshold reached |
 
-### Local Cost Control (No Server)
-
-For local development or testing, see the `cost_control_local.py` example which demonstrates implementing a policy engine locally. This pattern is useful for:
-
-- Understanding how cost control decisions work
-- Testing policy configurations before deploying a server
-- Simple use cases that don't need a full control server
+### Basic Setup
 
 ```python
-# See examples/cost_control_local.py for a complete example
-# that implements budget limits, throttling, and model degradation
-# without requiring a control server.
+import asyncio
+from aden import instrument_async, uninstrument_async, MeterOptions, RequestCancelledError
+
+async def main():
+    # Connects to control server and enables budget enforcement
+    await instrument_async(MeterOptions(
+        api_key="your-api-key",
+        server_url="https://your-aden-server.com",  # Optional
+        on_alert=lambda alert: print(f"[{alert.level}] {alert.message}"),
+    ))
+
+    # Use LLM SDKs normally - budgets enforced automatically
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI()
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Hello!"}],
+        )
+    except RequestCancelledError as e:
+        print(f"Request blocked: {e}")  # Budget exceeded
+
+    await uninstrument_async()
+
+asyncio.run(main())
 ```
 
-### Control Server
+### Multi-Budget Validation
 
-For production cost control, connect to an Aden control server:
+Aden supports multiple budget types that can be matched based on request metadata. When a request matches multiple budgets, **all matching budgets are validated** and the most restrictive decision is returned.
+
+| Budget Type | Matches On | Use Case |
+|-------------|------------|----------|
+| **global** | All requests | Organization-wide spend limit |
+| **agent** | `metadata.agent` | Per-agent budgets (e.g., "enterprise", "basic") |
+| **tenant** | `metadata.tenant` | Multi-tenant applications |
+| **customer** | `metadata.customer` | Per-customer spend limits |
+| **feature** | `metadata.feature` | Feature-specific budgets |
+| **tag** | `metadata.tag` | Custom groupings |
+
+#### Passing Metadata for Budget Matching
+
+Use `extra_body.metadata` to pass context that matches your budget configuration:
 
 ```python
-from aden import instrument, MeterOptions, create_control_agent, ControlAgentOptions
+response = await client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello!"}],
+    extra_body={
+        "metadata": {
+            "agent": "enterprise",      # Matches agent-type budget
+            "tenant": "acme-corp",      # Matches tenant-type budget
+            "customer": "customer-123", # Matches customer-type budget
+        }
+    },
+)
+# This request will be validated against:
+# 1. Global budget (always)
+# 2. Enterprise agent budget (if configured)
+# 3. Acme-corp tenant budget (if configured)
+# 4. Customer-123 budget (if configured)
+# Most restrictive action wins (e.g., if any budget blocks, request is blocked)
+```
 
-agent = create_control_agent(ControlAgentOptions(
-    server_url="https://your-control-server.com",
-    api_key="your-api-key",
-    on_alert=lambda alert: print(f"[{alert.level}] {alert.message}"),
-))
+### Budget Thresholds
 
-instrument(MeterOptions(
-    control_agent=agent,
-))
+Configure thresholds on the server to trigger actions at different usage levels:
+
+```
+0% ────────── 50% ─────────── 80% ─────────── 95% ─────────── 100%
+   [ALLOW]      [ALERT]         [DEGRADE]       [THROTTLE]      [BLOCK]
+```
+
+Example server-side budget configuration:
+```json
+{
+  "type": "global",
+  "limit": 100.00,
+  "thresholds": [
+    {"percent": 50, "action": "alert"},
+    {"percent": 80, "action": "degrade", "degradeTo": "gpt-4o-mini"},
+    {"percent": 95, "action": "throttle", "delayMs": 2000}
+  ],
+  "limitAction": "block"
+}
+```
+
+### Handling Budget Errors
+
+```python
+from aden import RequestCancelledError
+
+try:
+    response = await client.chat.completions.create(...)
+except RequestCancelledError as e:
+    # Budget exceeded - request was blocked before being sent
+    print(f"Request blocked: {e}")
+    # Handle gracefully (show user message, use fallback, etc.)
 ```
 
 ---
@@ -437,13 +515,14 @@ instrument(MeterOptions(
 
     # === Context Tracking ===
     get_context_id=lambda: get_user_id(),  # For per-user budgets
-    request_metadata={"env": "prod"},      # Custom metadata
+    request_metadata={"env": "prod"},      # Static metadata for all requests
 
-    # === Pre-request Hook ===
-    before_request=my_budget_checker,
+    # === Callbacks ===
+    on_alert=lambda alert: print(f"[{alert.level}] {alert.message}"),  # Alert handler
+    before_request=my_budget_checker,  # Custom pre-request hook (runs after budget check)
 
-    # === Local Control Agent ===
-    control_agent=my_control_agent,
+    # === Reliability ===
+    fail_open=True,                   # Allow requests if control server is unreachable
 ))
 ```
 
@@ -820,24 +899,25 @@ The sync context uses a background thread that:
 
 | Function | Description |
 |----------|-------------|
-| `create_control_agent(options)` | Create local control agent |
-| `create_control_agent_emitter(agent)` | Create emitter from agent |
+| `get_control_agent()` | Get the current control agent instance (created automatically with api_key) |
 
 ### Types
 
 ```python
 from aden import (
+    # Metrics
     MetricEvent,
     MeterOptions,
     NormalizedUsage,
     ToolCallMetric,
+
+    # Before request hooks
     BeforeRequestResult,
     BeforeRequestContext,
-    ControlPolicy,
-    ControlDecision,
+
+    # Alerts and errors
     AlertEvent,
     RequestCancelledError,
-    BudgetExceededError,
 )
 ```
 
@@ -852,7 +932,7 @@ Run examples with `python examples/<name>.py`:
 | `openai_basic.py` | Basic OpenAI instrumentation |
 | `anthropic_basic.py` | Basic Anthropic instrumentation |
 | `gemini_basic.py` | Basic Gemini instrumentation |
-| `cost_control_local.py` | Cost control without a server |
+| `control_actions.py` | Budget control with server (multi-budget validation) |
 | `pydantic_ai_example.py` | PydanticAI framework integration |
 
 ---
@@ -888,18 +968,25 @@ Run examples with `python examples/<name>.py`:
 
 ### Budget not enforcing
 
-1. **Check control agent is connected**: Budget enforcement requires a control agent connected to your server
+1. **Check you're using `instrument_async` with an API key**: Budget enforcement requires connecting to the control server
    ```python
-   agent = create_control_agent(ControlAgentOptions(
+   # Must use instrument_async for budget enforcement
+   await instrument_async(MeterOptions(
+       api_key="your-api-key",  # Required for budget enforcement
        server_url="https://your-server.com",
-       api_key="your-api-key",
-   ))
-   instrument(MeterOptions(
-       control_agent=agent,  # Required!
    ))
    ```
 
-2. **Verify server policy is configured**: Check your control server has the budget configured for your context
+2. **Verify server policy is configured**: Check your control server has budgets configured
+
+3. **Check metadata is being passed**: For multi-budget matching, ensure you're passing the right metadata
+   ```python
+   response = await client.chat.completions.create(
+       model="gpt-4o",
+       messages=[...],
+       extra_body={"metadata": {"agent": "enterprise"}},  # For agent-type budgets
+   )
+   ```
 
 ### Streaming not tracked
 

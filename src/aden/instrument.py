@@ -130,6 +130,7 @@ def _create_control_before_request_hook(
                 reason=decision.reason,
                 degraded_to=decision.degrade_to_model,
                 throttle_delay_ms=decision.throttle_delay_ms,
+                budget_id=decision.budget_id,
             )
             control_agent.report_control_event_sync(control_event)
 

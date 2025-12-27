@@ -52,6 +52,9 @@ class ControlDecision:
     alert_level: Literal["info", "warning", "critical"] | None = None
     """If action is 'alert', the severity level."""
 
+    budget_id: str | None = None
+    """ID of the budget that triggered this decision."""
+
 
 # =============================================================================
 # Control Events (SDK → Server)
@@ -99,6 +102,12 @@ class ControlEvent:
 
     estimated_cost: float | None = None
     """Estimated cost that triggered the decision."""
+
+    policy_id: str = "default"
+    """Policy ID for routing notifications on the server."""
+
+    budget_id: str | None = None
+    """ID of the budget that triggered this action."""
 
 
 @dataclass

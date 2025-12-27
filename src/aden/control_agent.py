@@ -724,6 +724,7 @@ class ControlAgent(IControlAgent):
         # This catches runaway spending even under concurrency
         hard_limit_decision = self._check_hard_limit(usage_percent, projected_percent)
         if hard_limit_decision:
+            hard_limit_decision.budget_id = budget.id
             return hard_limit_decision
 
         # HYBRID ENFORCEMENT: Check if we should validate with server
@@ -759,6 +760,7 @@ class ControlAgent(IControlAgent):
                     return ControlDecision(
                         action=ControlAction.BLOCK,
                         reason=f"Server validation failed for budget '{budget.id}' and fail_open is False",
+                        budget_id=budget.id,
                     )
                 # Continue with local enforcement below
 
@@ -772,10 +774,12 @@ class ControlAgent(IControlAgent):
                     action=ControlAction.DEGRADE,
                     reason=f"Budget '{budget.id}' exceeded: ${projected_spend:.4f} > ${limit} ({projected_percent:.1f}%)",
                     degrade_to_model=budget.degrade_to_model,
+                    budget_id=budget.id,
                 )
             return ControlDecision(
                 action=budget.action_on_exceed,
                 reason=f"Budget '{budget.id}' exceeded: ${projected_spend:.4f} > ${limit} ({projected_percent:.1f}%)",
+                budget_id=budget.id,
             )
 
         # Check degradation rules based on budget threshold
@@ -790,6 +794,7 @@ class ControlAgent(IControlAgent):
                         action=ControlAction.DEGRADE,
                         reason=f"Budget '{budget.id}' at {usage_percent:.1f}% (threshold: {degrade.threshold_percent}%)",
                         degrade_to_model=degrade.to_model,
+                        budget_id=budget.id,
                     )
 
         # No restrictive action needed for this budget
@@ -1102,6 +1107,7 @@ class ControlAgent(IControlAgent):
             action=action,
             reason=validation.reason or f"Server validation: {validation.action}",
             degrade_to_model=validation.degrade_to_model,
+            budget_id=budget_id,
         )
 
     def _http_request_sync(
