@@ -70,11 +70,21 @@ async def setup_policy() -> None:
         json_headers = {**headers, "Content-Type": "application/json"}
 
         # Get current policy to find global budget
-        policy_res = await client.get(
-            f"{SERVER_URL}/v1/control/policy",
-            headers=headers,
-        )
-        policy = policy_res.json()
+        try:
+            policy_res = await client.get(
+                f"{SERVER_URL}/v1/control/policy",
+                headers=headers,
+            )
+            if policy_res.status_code != 200:
+                print(f"  Failed to get policy: HTTP {policy_res.status_code}")
+                print(f"  Response: {policy_res.text[:200] if policy_res.text else '(empty)'}")
+                print(f"  Make sure the control server is running at {SERVER_URL}")
+                return
+            policy = policy_res.json()
+        except Exception as e:
+            print(f"  Failed to connect to control server: {e}")
+            print(f"  Make sure the control server is running at {SERVER_URL}")
+            return
 
         # Find global budget and update its limit
         global_budget = None
@@ -117,11 +127,18 @@ async def setup_policy() -> None:
             print("  No global budget found in policy\n")
 
         # Get and display the updated policy
-        policy_res = await client.get(
-            f"{SERVER_URL}/v1/control/policy",
-            headers=headers,
-        )
-        policy = policy_res.json()
+        try:
+            policy_res = await client.get(
+                f"{SERVER_URL}/v1/control/policy",
+                headers=headers,
+            )
+            if policy_res.status_code != 200:
+                print(f"  Failed to fetch updated policy: HTTP {policy_res.status_code}")
+                return
+            policy = policy_res.json()
+        except Exception as e:
+            print(f"  Failed to fetch updated policy: {e}")
+            return
         print("Updated policy budgets:")
         import json
         for budget in policy.get("budgets", []):
@@ -135,11 +152,20 @@ async def get_budget_status(debug: bool = False) -> dict[str, float]:
     Gets the global budget from the policy, which is what the SDK uses for enforcement.
     """
     async with httpx.AsyncClient() as client:
-        res = await client.get(
-            f"{SERVER_URL}/v1/control/policy",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-        )
-        data = res.json()
+        try:
+            res = await client.get(
+                f"{SERVER_URL}/v1/control/policy",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+            )
+            if res.status_code != 200:
+                if debug:
+                    print(f"   [DEBUG] Failed to get policy: HTTP {res.status_code}")
+                return {"spend": 0, "limit": BUDGET_LIMIT, "percent": 0}
+            data = res.json()
+        except Exception as e:
+            if debug:
+                print(f"   [DEBUG] Failed to get policy: {e}")
+            return {"spend": 0, "limit": BUDGET_LIMIT, "percent": 0}
 
         # Find the global budget from the policy
         budgets = data.get("budgets", [])

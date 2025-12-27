@@ -109,24 +109,46 @@ class ControlAgent(IControlAgent):
         self._pricing_aliases: dict[str, str] = {}
 
     async def connect(self) -> None:
-        """Connect to the control server."""
+        """Connect to the control server.
+
+        This method is designed to fail-through gracefully. If the server
+        is unreachable, the SDK will still operate with fail_open behavior
+        (allowing requests if fail_open=True, the default).
+        """
         url = self.options.server_url
         logger.info(f"[aden] Connecting to control server: {url}")
 
-        # Determine transport based on URL scheme
-        if url.startswith("wss://") or url.startswith("ws://"):
-            await self._connect_websocket()
-        else:
-            # HTTP-only mode: just use polling
-            logger.debug("[aden] Using HTTP polling mode")
-            await self._start_polling()
+        try:
+            # Determine transport based on URL scheme
+            if url.startswith("wss://") or url.startswith("ws://"):
+                await self._connect_websocket()
+            else:
+                # HTTP-only mode: just use polling
+                logger.debug("[aden] Using HTTP polling mode")
+                await self._start_polling()
+        except Exception as e:
+            logger.warning(f"[aden] Failed to connect to control server: {e}")
+            if not self.options.fail_open:
+                raise
+            # Continue with fail-open mode - no policy cached, requests allowed
 
-        # Fetch pricing table for accurate cost estimation
-        await self._fetch_pricing()
+        try:
+            # Fetch pricing table for accurate cost estimation
+            await self._fetch_pricing()
+        except Exception as e:
+            logger.warning(f"[aden] Failed to fetch pricing table: {e}")
+            # Continue with fallback pricing
 
-        # Start heartbeat
+        # Start heartbeat (never fails, just creates a background task)
         self._start_heartbeat()
-        logger.info("[aden] Control agent started")
+
+        if self._cached_policy:
+            logger.info("[aden] Control agent started")
+        else:
+            logger.warning(
+                "[aden] Control agent started without policy cache "
+                f"(fail_open={'enabled' if self.options.fail_open else 'disabled'})"
+            )
 
     async def _connect_websocket(self) -> None:
         """Connect via WebSocket."""
