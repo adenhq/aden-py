@@ -6,8 +6,10 @@ Call `instrument()` once at startup, and all available LLM client instances
 """
 
 import asyncio
+import atexit
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -55,6 +57,70 @@ logger = logging.getLogger("aden")
 # Track global options and control agent
 _global_options: MeterOptions | None = None
 _global_control_agent: IControlAgent | None = None
+
+# Background event loop for control agent (keeps Socket.IO alive)
+_background_loop: asyncio.AbstractEventLoop | None = None
+_background_thread: threading.Thread | None = None
+_background_loop_ready = threading.Event()
+
+
+def _run_background_loop() -> None:
+    """Run the background event loop in a dedicated thread."""
+    global _background_loop
+    _background_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_background_loop)
+    _background_loop_ready.set()
+    logger.debug("[aden] Background event loop started")
+    _background_loop.run_forever()
+    logger.debug("[aden] Background event loop stopped")
+
+
+def _start_background_loop() -> asyncio.AbstractEventLoop:
+    """Start the background event loop thread if not already running."""
+    global _background_thread, _background_loop
+
+    if _background_thread is not None and _background_thread.is_alive():
+        assert _background_loop is not None
+        return _background_loop
+
+    _background_loop_ready.clear()
+    _background_thread = threading.Thread(
+        target=_run_background_loop,
+        daemon=True,
+        name="aden-control-loop",
+    )
+    _background_thread.start()
+    _background_loop_ready.wait(timeout=5.0)
+
+    if _background_loop is None:
+        raise RuntimeError("Failed to start background event loop")
+
+    return _background_loop
+
+
+def _stop_background_loop() -> None:
+    """Stop the background event loop and thread."""
+    global _background_loop, _background_thread
+
+    if _background_loop is not None:
+        _background_loop.call_soon_threadsafe(_background_loop.stop)
+
+    if _background_thread is not None:
+        _background_thread.join(timeout=2.0)
+        _background_thread = None
+
+    _background_loop = None
+
+
+def _run_in_background_loop(coro: Awaitable[Any]) -> Any:
+    """Run a coroutine in the background event loop and wait for result."""
+    loop = _start_background_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=30.0)
+
+
+# Register cleanup on process exit
+atexit.register(_stop_background_loop)
 
 
 @dataclass
@@ -369,17 +435,18 @@ def instrument(options: MeterOptions) -> InstrumentationResult:
     api_key = options.api_key or os.environ.get("ADEN_API_KEY")
 
     if api_key:
-        # Try to run async version
+        # Try to run async version in background loop
         try:
             loop = asyncio.get_running_loop()
-            # We're in an async context - can't use asyncio.run
+            # We're in an async context - can't block, warn user
             logger.warning(
                 "[aden] API key provided but called from async context. "
                 "Use instrument_async() for control agent support."
             )
         except RuntimeError:
-            # No running loop - we can use asyncio.run
-            result = asyncio.run(instrument_async(options))
+            # No running loop - use background thread for persistent event loop
+            # This keeps the Socket.IO connection alive for hot reload
+            result = _run_in_background_loop(instrument_async(options))
             return InstrumentationResult(
                 openai=result.openai,
                 anthropic=result.anthropic,
@@ -453,8 +520,18 @@ def uninstrument() -> None:
 
     # Disconnect control agent if connected
     if _global_control_agent:
-        _global_control_agent.disconnect_sync()
+        # Use background loop for proper async disconnect if available
+        if _background_loop is not None and _background_loop.is_running():
+            try:
+                _run_in_background_loop(_global_control_agent.disconnect())
+            except Exception as e:
+                logger.debug(f"[aden] Async disconnect error (ignored): {e}")
+        else:
+            _global_control_agent.disconnect_sync()
         _global_control_agent = None
+
+    # Stop the background event loop
+    _stop_background_loop()
 
     uninstrument_openai()
     uninstrument_anthropic()
