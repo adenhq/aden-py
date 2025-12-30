@@ -4,7 +4,8 @@ Control Agent - Bidirectional communication with control server.
 Emits: metrics, control events, heartbeat
 Receives: control policies (budgets, throttle, block, degrade)
 
-Uses WebSocket for real-time communication with HTTP polling fallback.
+Uses Socket.IO for real-time communication with HTTP polling fallback.
+Supports hot reload of policy updates including budget policies.
 """
 
 import asyncio
@@ -72,8 +73,9 @@ class ControlAgent(IControlAgent):
             max_expected_overspend_percent=options.max_expected_overspend_percent,
         )
 
-        # WebSocket state
-        self._ws: Any = None
+        # Socket.IO / WebSocket state
+        self._ws: Any = None  # Legacy websocket (deprecated)
+        self._sio: Any = None  # Socket.IO client
         self._connected = False
         self._reconnect_attempts = 0
         self._max_reconnect_attempts = 10
@@ -151,70 +153,159 @@ class ControlAgent(IControlAgent):
             )
 
     async def _connect_websocket(self) -> None:
-        """Connect via WebSocket."""
+        """Connect via Socket.IO."""
         try:
-            # Try to import websockets library
-            import websockets
+            # Try to import socketio library
+            import socketio
         except ImportError:
-            logger.warning("[aden] websockets library not installed, using HTTP polling only")
+            logger.warning("[aden] python-socketio library not installed, using HTTP polling only")
             await self._start_polling()
             return
 
         try:
-            ws_url = f"{self.options.server_url}/v1/control/ws"
+            # Build Socket.IO URL (remove wss:// prefix and add http(s)://)
+            base_url = self.options.server_url
+            if base_url.startswith("wss://"):
+                base_url = "https://" + base_url[6:]
+            elif base_url.startswith("ws://"):
+                base_url = "http://" + base_url[5:]
+
+            # Create Socket.IO client
+            sio = socketio.AsyncClient(
+                reconnection=True,
+                reconnection_attempts=self._max_reconnect_attempts,
+                reconnection_delay=1,
+                reconnection_delay_max=30,
+                logger=False,
+                engineio_logger=False,
+            )
+
+            # Store the client
+            self._sio = sio
+
+            # Set up event handlers
+            @sio.on("connect", namespace="/v1/control/ws")
+            async def on_connect():
+                self._connected = True
+                self._reconnect_attempts = 0
+                logger.info("[aden] Socket.IO connected to control server")
+                # Flush queued events
+                await self._flush_event_queue()
+
+            @sio.on("disconnect", namespace="/v1/control/ws")
+            async def on_disconnect():
+                logger.warning("[aden] Socket.IO disconnected")
+                self._connected = False
+
+            @sio.on("message", namespace="/v1/control/ws")
+            async def on_message(data):
+                await self._handle_socketio_message(data)
+
+            @sio.on("connect_error", namespace="/v1/control/ws")
+            async def on_connect_error(error):
+                logger.warning(f"[aden] Socket.IO connection error: {error}")
+                self._connected = False
+
+            # Connect with auth headers
+            auth = {
+                "token": self.options.api_key,
+            }
             headers = {
                 "Authorization": f"Bearer {self.options.api_key}",
                 "X-SDK-Instance-ID": self.options.instance_id,
             }
 
             try:
-                self._ws = await asyncio.wait_for(
-                    websockets.connect(ws_url, extra_headers=headers),
+                await asyncio.wait_for(
+                    sio.connect(
+                        base_url,
+                        namespaces=["/v1/control/ws"],
+                        auth=auth,
+                        headers=headers,
+                        transports=["websocket", "polling"],
+                    ),
                     timeout=self.options.timeout_ms / 1000,
                 )
-                self._connected = True
-                self._reconnect_attempts = 0
-                logger.info("[aden] WebSocket connected to control server")
-
-                # Start message handler
-                asyncio.create_task(self._handle_websocket_messages())
-
-                # Flush queued events
-                await self._flush_event_queue()
-
             except asyncio.TimeoutError:
-                logger.warning("[aden] WebSocket connection timeout, using polling")
+                logger.warning("[aden] Socket.IO connection timeout, using polling")
                 await self._start_polling()
             except Exception as e:
-                logger.warning(f"[aden] WebSocket connection failed: {e}, using polling")
+                logger.warning(f"[aden] Socket.IO connection failed: {e}, using polling")
                 await self._start_polling()
 
         except Exception as e:
-            logger.warning(f"[aden] WebSocket setup failed: {e}, using polling")
+            logger.warning(f"[aden] Socket.IO setup failed: {e}, using polling")
             await self._start_polling()
 
-    async def _handle_websocket_messages(self) -> None:
-        """Handle incoming WebSocket messages."""
-        if self._ws is None:
+    async def _handle_socketio_message(self, data: dict[str, Any]) -> None:
+        """Handle incoming Socket.IO messages."""
+        try:
+            msg_type = data.get("type")
+            if msg_type == "policy":
+                self._cached_policy = self._parse_policy(data.get("policy", {}))
+                self._last_policy_fetch = time.time()
+                logger.info(f"[aden] Policy updated: {self._cached_policy.version}")
+            elif msg_type == "budget_policy":
+                # Handle budget-specific policy updates
+                budget_data = data.get("budgets", [])
+                if self._cached_policy and budget_data:
+                    self._update_budgets_from_server(budget_data)
+                    self._last_policy_fetch = time.time()
+                    logger.info("[aden] Budget policy updated")
+            elif msg_type == "command":
+                logger.info(f"[aden] Command received: {data}")
+            elif msg_type == "alert":
+                logger.info(f"[aden] Alert received: {data.get('alert', {})}")
+        except Exception as e:
+            logger.warning(f"[aden] Failed to handle Socket.IO message: {e}")
+
+    def _update_budgets_from_server(self, budget_data: list[dict[str, Any]]) -> None:
+        """Update budgets in the cached policy from server data."""
+        if not self._cached_policy:
             return
 
-        try:
-            async for message in self._ws:
-                try:
-                    data = json.loads(message)
-                    if data.get("type") == "policy":
-                        self._cached_policy = self._parse_policy(data.get("policy", {}))
-                        self._last_policy_fetch = time.time()
-                        logger.info(f"[aden] Policy updated: {self._cached_policy.version}")
-                    elif data.get("type") == "command":
-                        logger.info(f"[aden] Command received: {data}")
-                except json.JSONDecodeError:
-                    logger.warning("[aden] Failed to parse WebSocket message")
-        except Exception as e:
-            logger.warning(f"[aden] WebSocket error: {e}")
-            self._connected = False
-            self._schedule_reconnect()
-            await self._start_polling()
+        # Parse and update budgets
+        updated_budgets = []
+        for b in budget_data:
+            updated_budgets.append(self._parse_budget(b))
+
+        self._cached_policy.budgets = updated_budgets
+        logger.debug(f"[aden] Updated {len(updated_budgets)} budgets from server")
+
+    def _parse_budget(self, b: dict[str, Any]) -> BudgetRule:
+        """Parse a budget from server or legacy format."""
+        from .control_types import BudgetRule
+
+        # Map server limitAction to ControlAction
+        limit_action = b.get("limitAction") or b.get("action_on_exceed", "block")
+        action_map = {
+            "kill": ControlAction.BLOCK,
+            "block": ControlAction.BLOCK,
+            "degrade": ControlAction.DEGRADE,
+            "throttle": ControlAction.THROTTLE,
+            "alert": ControlAction.ALERT,
+        }
+        action = action_map.get(limit_action, ControlAction.BLOCK)
+
+        return BudgetRule(
+            # Server format uses 'id', legacy uses 'context_id' as ID
+            id=b.get("id") or b.get("context_id", ""),
+            # Server format uses 'type', default to 'global' if not specified
+            budget_type=b.get("type", "global"),
+            # Server uses 'limit', legacy uses 'limit_usd'
+            limit_usd=b.get("limit") or b.get("limit_usd", 0),
+            # Server uses 'spent', legacy uses 'current_spend_usd'
+            current_spend_usd=b.get("spent") or b.get("current_spend_usd", 0),
+            action_on_exceed=action,
+            # Server uses 'name' for matching, also used as context identifier
+            name=b.get("name"),
+            # Server uses 'degradeToModel', legacy uses 'degrade_to_model'
+            degrade_to_model=b.get("degradeToModel") or b.get("degrade_to_model"),
+            # Tags for tag-type budgets
+            tags=b.get("tags"),
+            # Legacy context_id for backwards compatibility
+            context_id=b.get("context_id"),
+        )
 
     def _parse_policy(self, data: dict[str, Any]) -> ControlPolicy:
         """Parse policy JSON into ControlPolicy object.
@@ -225,48 +316,14 @@ class ControlAgent(IControlAgent):
         from .control_types import (
             AlertRule,
             BlockRule,
-            BudgetRule,
             DegradeRule,
             ThrottleRule,
         )
 
-        def parse_budget(b: dict[str, Any]) -> BudgetRule:
-            """Parse a budget from server or legacy format."""
-            # Map server limitAction to ControlAction
-            limit_action = b.get("limitAction") or b.get("action_on_exceed", "block")
-            action_map = {
-                "kill": ControlAction.BLOCK,
-                "block": ControlAction.BLOCK,
-                "degrade": ControlAction.DEGRADE,
-                "throttle": ControlAction.THROTTLE,
-                "alert": ControlAction.ALERT,
-            }
-            action = action_map.get(limit_action, ControlAction.BLOCK)
-
-            return BudgetRule(
-                # Server format uses 'id', legacy uses 'context_id' as ID
-                id=b.get("id") or b.get("context_id", ""),
-                # Server format uses 'type', default to 'global' if not specified
-                budget_type=b.get("type", "global"),
-                # Server uses 'limit', legacy uses 'limit_usd'
-                limit_usd=b.get("limit") or b.get("limit_usd", 0),
-                # Server uses 'spent', legacy uses 'current_spend_usd'
-                current_spend_usd=b.get("spent") or b.get("current_spend_usd", 0),
-                action_on_exceed=action,
-                # Server uses 'name' for matching, also used as context identifier
-                name=b.get("name"),
-                # Server uses 'degradeToModel', legacy uses 'degrade_to_model'
-                degrade_to_model=b.get("degradeToModel") or b.get("degrade_to_model"),
-                # Tags for tag-type budgets
-                tags=b.get("tags"),
-                # Legacy context_id for backwards compatibility
-                context_id=b.get("context_id"),
-            )
-
         return ControlPolicy(
             version=data.get("version", "unknown"),
             updated_at=data.get("updated_at", ""),
-            budgets=[parse_budget(b) for b in data.get("budgets", [])],
+            budgets=[self._parse_budget(b) for b in data.get("budgets", [])],
             throttles=[
                 ThrottleRule(
                     context_id=t.get("context_id"),
@@ -414,6 +471,8 @@ class ControlAgent(IControlAgent):
             self._reconnect_task.cancel()
             self._reconnect_task = None
 
+        # Socket.IO disconnect needs to be done in async context
+        # We mark as disconnected here; async cleanup happens in disconnect()
         self._connected = False
         logger.info("[aden] Control agent disconnected")
 
@@ -430,8 +489,20 @@ class ControlAgent(IControlAgent):
             self._reconnect_task.cancel()
             self._reconnect_task = None
 
+        # Disconnect Socket.IO client
+        if self._sio:
+            try:
+                await self._sio.disconnect()
+            except Exception as e:
+                logger.debug(f"[aden] Socket.IO disconnect error (ignored): {e}")
+            self._sio = None
+
+        # Legacy websocket cleanup (if any)
         if self._ws:
-            await self._ws.close()
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
             self._ws = None
 
         self._connected = False
@@ -1481,18 +1552,18 @@ class ControlAgent(IControlAgent):
 
     async def _send_event(self, event: ServerEvent) -> None:
         """Send an event to the server."""
-        # If WebSocket is connected, send via WebSocket
-        if self._connected and self._ws:
+        # If Socket.IO is connected, send via Socket.IO
+        if self._connected and self._sio:
             try:
-                await self._ws.send(json.dumps(asdict(event)))
+                await self._sio.emit("message", asdict(event), namespace="/v1/control/ws")
                 return
             except Exception:
-                logger.warning("[aden] WebSocket send failed, queuing event")
+                logger.warning("[aden] Socket.IO send failed, queuing event")
 
         # Otherwise queue for HTTP batch
         self._queue_event(event)
 
-        # If not connected via WebSocket, flush via HTTP
+        # If not connected via Socket.IO, flush via HTTP
         if not self._connected:
             await self._flush_event_queue()
 
@@ -1512,14 +1583,14 @@ class ControlAgent(IControlAgent):
         event_count = len(events)
         logger.debug(f"[aden] Flushing {event_count} events to server")
 
-        # If WebSocket connected, send there
-        if self._connected and self._ws:
+        # If Socket.IO connected, send there
+        if self._connected and self._sio:
             for event in events:
                 try:
-                    await self._ws.send(json.dumps(asdict(event)))
+                    await self._sio.emit("message", asdict(event), namespace="/v1/control/ws")
                 except Exception:
                     self._queue_event(event)
-            logger.debug(f"[aden] Sent {event_count} events via WebSocket")
+            logger.debug(f"[aden] Sent {event_count} events via Socket.IO")
             return
 
         # Otherwise send via HTTP batch
