@@ -46,6 +46,9 @@ class ControlDecision:
     degrade_to_model: str | None = None
     """If action is 'degrade', switch to this model."""
 
+    degrade_to_provider: str | None = None
+    """If action is 'degrade', the provider of the degraded model."""
+
     throttle_delay_ms: int | None = None
     """If action is 'throttle', delay by this many milliseconds."""
 
@@ -226,6 +229,9 @@ class BudgetRule:
 
     degrade_to_model: str | None = None
     """If action is 'degrade', switch to this model."""
+
+    degrade_to_provider: str | None = None
+    """If action is 'degrade', the provider of the degraded model."""
 
     tags: list[str] | None = None
     """Tags for tag-type budgets."""
@@ -535,6 +541,9 @@ class BudgetValidationResponse:
 
     degrade_to_model: str | None = None
     """Model to degrade to (if action is degrade)."""
+
+    degrade_to_provider: str | None = None
+    """Provider of the degraded model (if action is degrade)."""
 
 
 # =============================================================================

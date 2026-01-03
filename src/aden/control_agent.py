@@ -301,6 +301,8 @@ class ControlAgent(IControlAgent):
             name=b.get("name"),
             # Server uses 'degradeToModel', legacy uses 'degrade_to_model'
             degrade_to_model=b.get("degradeToModel") or b.get("degrade_to_model"),
+            # Server uses 'degradeToProvider', legacy uses 'degrade_to_provider'
+            degrade_to_provider=b.get("degradeToProvider") or b.get("degrade_to_provider"),
             # Tags for tag-type budgets
             tags=b.get("tags"),
             # Legacy context_id for backwards compatibility
@@ -868,6 +870,7 @@ class ControlAgent(IControlAgent):
                     action=ControlAction.DEGRADE,
                     reason=f"Budget '{budget.id}' exceeded: ${projected_spend:.4f} > ${limit} ({projected_percent:.1f}%)",
                     degrade_to_model=budget.degrade_to_model,
+                    degrade_to_provider=budget.degrade_to_provider,
                     budget_id=budget.id,
                 )
             return ControlDecision(
@@ -1082,6 +1085,7 @@ class ControlAgent(IControlAgent):
                         reason=response_data.get("reason"),
                         projected_percent=response_data.get("projected_percent"),
                         degrade_to_model=response_data.get("degrade_to_model"),
+                        degrade_to_provider=response_data.get("degrade_to_provider"),
                     )
                 else:
                     logger.warning(
@@ -1163,6 +1167,7 @@ class ControlAgent(IControlAgent):
                             reason=response_data.get("reason"),
                             projected_percent=response_data.get("projected_percent"),
                             degrade_to_model=response_data.get("degrade_to_model"),
+                            degrade_to_provider=response_data.get("degrade_to_provider"),
                         )
                     else:
                         logger.warning(
@@ -1201,6 +1206,7 @@ class ControlAgent(IControlAgent):
             action=action,
             reason=validation.reason or f"Server validation: {validation.action}",
             degrade_to_model=validation.degrade_to_model,
+            degrade_to_provider=validation.degrade_to_provider,
             budget_id=budget_id,
         )
 
