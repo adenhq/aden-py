@@ -160,6 +160,36 @@ def normalize_gemini_usage(usage_metadata: Any) -> NormalizedUsage | None:
     )
 
 
+def normalize_gemini_grpc_usage(usage_metadata: Any) -> NormalizedUsage | None:
+    """
+    Normalizes usage data from Google Gemini gRPC API responses.
+
+    The gRPC client (GenerativeServiceClient) returns usage_metadata with
+    snake_case attribute names, accessed via getattr().
+
+    Args:
+        usage_metadata: Raw usage_metadata from Gemini gRPC response
+
+    Returns:
+        Normalized usage metrics, or None if no usage data provided
+    """
+    if usage_metadata is None:
+        return None
+
+    input_tokens = getattr(usage_metadata, 'prompt_token_count', 0) or 0
+    output_tokens = getattr(usage_metadata, 'candidates_token_count', 0) or 0
+
+    return NormalizedUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=getattr(usage_metadata, 'total_token_count', 0) or (input_tokens + output_tokens),
+        cached_tokens=getattr(usage_metadata, 'cached_content_token_count', 0) or 0,
+        reasoning_tokens=0,
+        accepted_prediction_tokens=0,
+        rejected_prediction_tokens=0,
+    )
+
+
 def normalize_usage(
     usage: Any,
     provider: Literal["openai", "anthropic", "gemini"] = "openai",

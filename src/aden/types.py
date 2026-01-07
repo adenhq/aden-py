@@ -544,12 +544,16 @@ class InstrumentationResult:
     genai: bool = False
     """Whether Google GenAI SDK (google-genai) was instrumented."""
 
+    gemini_grpc: bool = False
+    """Whether Google Gemini gRPC client was instrumented."""
+
     def __str__(self) -> str:
         instrumented = [name for name, success in [
             ("openai", self.openai),
             ("anthropic", self.anthropic),
             ("gemini", self.gemini),
             ("genai", self.genai),
+            ("gemini_grpc", self.gemini_grpc),
         ] if success]
         if instrumented:
             return f"Instrumented: {', '.join(instrumented)}"
