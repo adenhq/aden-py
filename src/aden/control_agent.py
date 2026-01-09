@@ -121,13 +121,8 @@ class ControlAgent(IControlAgent):
         logger.info(f"[aden] Connecting to control server: {url}")
 
         try:
-            # Determine transport based on URL scheme
-            if url.startswith("wss://") or url.startswith("ws://"):
-                await self._connect_websocket()
-            else:
-                # HTTP-only mode: just use polling
-                logger.debug("[aden] Using HTTP polling mode")
-                await self._start_polling()
+            # Always try Socket.IO/WebSocket first, fall back to HTTP polling
+            await self._connect_websocket()
         except Exception as e:
             logger.warning(f"[aden] Failed to connect to control server: {e}")
             if not self.options.fail_open:
@@ -1649,9 +1644,10 @@ class ControlAgent(IControlAgent):
         if self._connected and self._sio:
             try:
                 await self._sio.emit("message", asdict(event), namespace="/v1/control/ws")
+                logger.debug(f"[aden] Sent event via Socket.IO: {event.event_type}")
                 return
-            except Exception:
-                logger.warning("[aden] Socket.IO send failed, queuing event")
+            except Exception as e:
+                logger.warning(f"[aden] Socket.IO send failed: {e}, queuing event")
 
         # Otherwise queue for HTTP batch
         self._queue_event(event)
@@ -1687,6 +1683,7 @@ class ControlAgent(IControlAgent):
             return
 
         # Otherwise send via HTTP batch
+        logger.debug(f"[aden] Sending {event_count} events via HTTP (Socket.IO not connected)")
         try:
             result = await self._http_request(
                 "/v1/control/events",
@@ -1694,7 +1691,7 @@ class ControlAgent(IControlAgent):
                 {"events": [asdict(e) for e in events]},
             )
             if result.get("ok"):
-                logger.debug(f"[aden] Successfully sent {event_count} events")
+                logger.debug(f"[aden] Successfully sent {event_count} events via HTTP")
             else:
                 logger.warning(
                     f"[aden] Failed to send {event_count} events to server: "
