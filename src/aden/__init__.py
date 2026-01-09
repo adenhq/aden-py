@@ -73,6 +73,11 @@ from .instrument_genai import (
     uninstrument_genai,
     is_genai_instrumented,
 )
+from .instrument_dify import (
+    instrument_dify,
+    uninstrument_dify,
+    is_dify_instrumented,
+)
 
 # Control Agent
 from .control_types import (
@@ -177,6 +182,9 @@ __all__ = [
     "instrument_genai",
     "uninstrument_genai",
     "is_genai_instrumented",
+    "instrument_dify",
+    "uninstrument_dify",
+    "is_dify_instrumented",
     # Control Agent
     "ControlAction",
     "ControlDecision",
