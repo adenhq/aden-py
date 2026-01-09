@@ -75,6 +75,209 @@ class RateLimitInfo:
     """Time until token limit resets (seconds)."""
 
 
+# =============================================================================
+# Layer 0: Content Capture Types
+# =============================================================================
+
+
+@dataclass
+class ContentReference:
+    """Reference to large content stored separately via control agent.
+
+    When content exceeds max_content_bytes, it is stored on the server
+    and a reference is kept in the MetricEvent for retrieval.
+    """
+
+    content_id: str
+    """Unique ID for retrieving the full content from server."""
+
+    content_hash: str
+    """SHA-256 hash of the full content for verification."""
+
+    byte_size: int
+    """Size of the full content in bytes."""
+
+    truncated_preview: str | None = None
+    """Truncated preview of the content (for quick inspection)."""
+
+
+@dataclass
+class MessageCapture:
+    """Captured message from request or response."""
+
+    role: str
+    """Message role: system, user, assistant, tool."""
+
+    content: str | ContentReference | None = None
+    """Text content or reference to large content."""
+
+    name: str | None = None
+    """Name (for named messages or tool results)."""
+
+    tool_call_id: str | None = None
+    """Tool call ID (for tool result messages)."""
+
+
+@dataclass
+class ToolSchemaCapture:
+    """Captured tool schema from request."""
+
+    name: str
+    """Tool/function name."""
+
+    description: str | None = None
+    """Tool description."""
+
+    parameters_schema: dict[str, Any] | ContentReference | None = None
+    """JSON Schema for parameters (or reference if large)."""
+
+
+@dataclass
+class RequestParamsCapture:
+    """Captured request parameters."""
+
+    temperature: float | None = None
+    """Sampling temperature."""
+
+    max_tokens: int | None = None
+    """Maximum tokens to generate."""
+
+    top_p: float | None = None
+    """Nucleus sampling parameter."""
+
+    frequency_penalty: float | None = None
+    """Frequency penalty (OpenAI)."""
+
+    presence_penalty: float | None = None
+    """Presence penalty (OpenAI)."""
+
+    stop: list[str] | None = None
+    """Stop sequences."""
+
+    seed: int | None = None
+    """Random seed for reproducibility."""
+
+    top_k: int | None = None
+    """Top-k sampling (Anthropic/Gemini)."""
+
+
+@dataclass
+class ContentCapture:
+    """Layer 0: Full content capture for request and response.
+
+    Captures the actual text content flowing through LLM calls,
+    enabling governance, debugging, and compliance use cases.
+    """
+
+    # === Request Content ===
+    system_prompt: str | ContentReference | None = None
+    """System prompt (or reference if large)."""
+
+    messages: list[MessageCapture] | ContentReference | None = None
+    """Messages array (or reference if large)."""
+
+    tools: list[ToolSchemaCapture] | ContentReference | None = None
+    """Tools schema array (or reference if large)."""
+
+    params: RequestParamsCapture | None = None
+    """Request parameters (temperature, max_tokens, etc.)."""
+
+    # === Response Content ===
+    response_content: str | ContentReference | None = None
+    """Response text content (or reference if large)."""
+
+    finish_reason: str | None = None
+    """Why the response ended: stop, length, tool_calls, content_filter, etc."""
+
+    choice_count: int | None = None
+    """Number of choices in response (for n > 1)."""
+
+    # === Multimodal ===
+    has_images: bool = False
+    """Whether request contained images."""
+
+    image_urls: list[str] | None = None
+    """Image URLs from request (not base64 data)."""
+
+
+@dataclass
+class ContentCaptureOptions:
+    """Configuration for content capture behavior."""
+
+    max_content_bytes: int = 4096
+    """Maximum bytes before content is stored separately (default 4KB)."""
+
+    capture_system_prompt: bool = True
+    """Whether to capture system prompts."""
+
+    capture_messages: bool = True
+    """Whether to capture message history."""
+
+    capture_tools_schema: bool = True
+    """Whether to capture tools schema."""
+
+    capture_response: bool = True
+    """Whether to capture response content."""
+
+    capture_images: bool = True
+    """Whether to capture image URLs (never base64)."""
+
+    redact_patterns: list[str] | None = None
+    """Regex patterns to redact from captured content."""
+
+
+# =============================================================================
+# Layer 6: Tool Call Deep Inspection Types
+# =============================================================================
+
+
+@dataclass
+class ToolCallValidationError:
+    """Validation error for a tool call argument."""
+
+    path: str
+    """JSON path to the invalid field (e.g., 'properties.name')."""
+
+    message: str
+    """Validation error message."""
+
+    expected_type: str | None = None
+    """Expected type from schema."""
+
+    actual_type: str | None = None
+    """Actual type received."""
+
+
+@dataclass
+class ToolCallCapture:
+    """Layer 6: Detailed tool call capture with validation.
+
+    Captures full tool call information including arguments,
+    IDs for correlation, and schema validation results.
+    """
+
+    id: str
+    """Tool call ID for correlation with tool results."""
+
+    name: str
+    """Tool/function name."""
+
+    arguments: dict[str, Any] | ContentReference | None = None
+    """Parsed arguments (or reference if large)."""
+
+    arguments_raw: str | ContentReference | None = None
+    """Raw arguments JSON string (for debugging parse errors)."""
+
+    validation_errors: list[ToolCallValidationError] | None = None
+    """Schema validation errors (if any)."""
+
+    is_valid: bool = True
+    """Whether arguments passed schema validation."""
+
+    index: int | None = None
+    """Index in the tool_calls array (for ordering)."""
+
+
 @dataclass
 class ToolCallMetric:
     """Metric for individual tool calls."""
@@ -228,6 +431,25 @@ class MetricEvent:
 
     metadata: dict[str, str] | None = None
     """Custom metadata attached to the request."""
+
+    # === Layer 0: Content Capture (optional) ===
+    content_capture: ContentCapture | None = None
+    """Raw content capture (when capture_content=True).
+
+    Contains system prompt, messages, tools schema, and response content.
+    Large content is stored on server with ContentReference.
+    """
+
+    # === Layer 6: Tool Call Deep Inspection (optional) ===
+    tool_calls_captured: list[ToolCallCapture] | None = None
+    """Detailed tool call captures (when capture_tool_calls=True).
+
+    Contains full arguments, IDs, and schema validation results.
+    Different from tool_call_count/tool_names which are just summaries.
+    """
+
+    tool_validation_errors_count: int | None = None
+    """Count of tool calls with validation errors."""
 
 
 @dataclass
@@ -389,7 +611,32 @@ class MeterOptions:
     """Custom metric emitter function."""
 
     track_tool_calls: bool = True
-    """Whether to include tool call metrics."""
+    """Whether to include tool call metrics (count and names)."""
+
+    # Layer 0: Content Capture
+    capture_content: bool = False
+    """Enable Layer 0 raw content capture. Disabled by default for privacy.
+
+    When enabled, captures system prompts, messages, tools schema, and response
+    content. Large content is stored on server with ContentReference.
+    """
+
+    content_capture_options: ContentCaptureOptions | None = None
+    """Configuration for content capture behavior (max bytes, redaction, etc.)."""
+
+    # Layer 6: Tool Call Deep Inspection
+    capture_tool_calls: bool = False
+    """Enable Layer 6 tool call deep inspection. Disabled by default.
+
+    When enabled, captures full tool call arguments with IDs and
+    validates them against the tool schema if validate_tool_schemas=True.
+    """
+
+    validate_tool_schemas: bool = True
+    """When capture_tool_calls=True, validate arguments against tool schemas.
+
+    Validation errors are reported in ToolCallCapture.validation_errors.
+    """
 
     generate_trace_id: Callable[[], str] | None = None
     """Custom trace ID generator (default: uuid4)."""

@@ -1261,11 +1261,25 @@ class ControlAgent(IControlAgent):
         event_count = len(events)
         logger.debug(f"[aden] Flushing {event_count} events to server")
 
+        # Debug: log content_capture presence
+        for e in events:
+            if hasattr(e, 'data') and hasattr(e.data, 'content_capture'):
+                cc = e.data.content_capture
+                if cc:
+                    logger.debug(f"[aden] Event has content_capture: system_prompt={cc.system_prompt is not None}, messages={cc.messages is not None}, response={cc.response_content is not None}")
+                else:
+                    logger.debug("[aden] Event content_capture is None")
+
         try:
+            event_dicts = [asdict(e) for e in events]
+            # Debug: log serialized content_capture
+            for ed in event_dicts:
+                if 'data' in ed and ed['data'].get('content_capture'):
+                    logger.debug(f"[aden] Serialized content_capture keys: {list(ed['data']['content_capture'].keys())}")
             result = self._http_request_sync(
                 "/v1/control/events",
                 "POST",
-                {"events": [asdict(e) for e in events]},
+                {"events": event_dicts},
             )
             if result.get("ok"):
                 logger.debug(f"[aden] Successfully sent {event_count} events")
@@ -1555,6 +1569,79 @@ class ControlAgent(IControlAgent):
         )
 
         await self._send_event(event)
+
+    async def store_large_content(self, content_payloads: list[dict[str, Any]]) -> None:
+        """Store large content items on the control server.
+
+        Used by Layer 0 content capture for storing content that exceeds
+        max_content_bytes threshold. Content is referenced via ContentReference.
+
+        Args:
+            content_payloads: List of content items to store, each containing:
+                - content_id: Unique ID for the content
+                - content_hash: SHA-256 hash of the content
+                - content: The actual content string or serialized data
+                - byte_size: Size of the content in bytes
+        """
+        if not content_payloads:
+            return
+
+        try:
+            result = await self._http_request(
+                "/v1/control/content",
+                "POST",
+                {"items": content_payloads},
+            )
+            if result.get("ok"):
+                logger.debug(f"[aden] Stored {len(content_payloads)} large content items")
+            else:
+                logger.warning(
+                    f"[aden] Failed to store large content: status={result.get('status', 'unknown')}"
+                )
+        except Exception as e:
+            logger.warning(f"[aden] Failed to store large content: {e}")
+
+    def store_large_content_sync(self, content_payloads: list[dict[str, Any]]) -> None:
+        """Store large content items on the control server (sync version).
+
+        Args:
+            content_payloads: List of content items to store
+        """
+        if not content_payloads:
+            return
+
+        try:
+            import requests
+        except ImportError:
+            logger.warning("[aden] requests not installed, sync content storage disabled")
+            return
+
+        http_url = (
+            self.options.server_url.replace("wss://", "https://").replace(
+                "ws://", "http://"
+            )
+        )
+
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.options.api_key}",
+                "X-SDK-Instance-ID": self.options.instance_id or "",
+            }
+            response = requests.post(
+                f"{http_url}/v1/control/content",
+                headers=headers,
+                json={"items": content_payloads},
+                timeout=self.options.timeout_ms / 1000,
+            )
+            if response.status_code == 200:
+                logger.debug(f"[aden] Stored {len(content_payloads)} large content items")
+            else:
+                logger.warning(
+                    f"[aden] Failed to store large content: status={response.status_code}"
+                )
+        except Exception as e:
+            logger.warning(f"[aden] Failed to store large content: {e}")
 
     async def _send_event(self, event: ServerEvent) -> None:
         """Send an event to the server."""

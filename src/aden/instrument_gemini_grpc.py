@@ -18,11 +18,18 @@ from uuid import uuid4
 from datetime import datetime
 
 from .call_stack import CallStackInfo, capture_call_stack
+from .content_capture import (
+    extract_gemini_grpc_request_content,
+    extract_gemini_grpc_response_content,
+)
+from .large_content import store_large_content
 from .normalize import normalize_gemini_grpc_usage
 from .types import (
     BeforeRequestAction,
     BeforeRequestContext,
     BeforeRequestResult,
+    ContentCapture,
+    ContentCaptureOptions,
     MeterOptions,
     MetricEvent,
     NormalizedUsage,
@@ -72,6 +79,7 @@ def _build_metric_event(
     error: str | None = None,
     metadata: dict[str, Any] | None = None,
     stack_info: CallStackInfo | None = None,
+    content_capture: ContentCapture | None = None,
 ) -> MetricEvent:
     """Build a MetricEvent for Gemini gRPC calls."""
     return MetricEvent(
@@ -95,6 +103,7 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
+        content_capture=content_capture,
     )
 
 
@@ -139,12 +148,44 @@ def _wrap_generate_content_sync(original_fn: Callable[..., Any]) -> Callable[...
         span_id = options.generate_span_id() if options.generate_span_id else str(uuid4())
         t0 = time.time()
 
+        # Layer 0: Content Capture - extract request content before API call
+        content_capture: ContentCapture | None = None
+        large_content_payloads: list[dict[str, Any]] = []
+        if options.capture_content:
+            capture_options = options.content_capture_options or ContentCaptureOptions()
+            content_capture, request_payloads = extract_gemini_grpc_request_content(
+                request, capture_options
+            )
+            if request_payloads:
+                large_content_payloads.extend(request_payloads)
+
         try:
             response = original_fn(self, request, *args, **kwargs)
 
             usage = None
             if hasattr(response, 'usage_metadata'):
-                usage = normalize_gemini_grpc_usage(response.usage_metadata)
+                usage_metadata = response.usage_metadata
+                logger.debug(
+                    f"[aden] gRPC usage_metadata: prompt_token_count={getattr(usage_metadata, 'prompt_token_count', None)}, "
+                    f"candidates_token_count={getattr(usage_metadata, 'candidates_token_count', None)}, "
+                    f"total_token_count={getattr(usage_metadata, 'total_token_count', None)}"
+                )
+                usage = normalize_gemini_grpc_usage(usage_metadata)
+            else:
+                logger.debug(f"[aden] gRPC response has no usage_metadata. Response attrs: {[a for a in dir(response) if not a.startswith('_')][:15]}")
+
+            # Layer 0: Extract response content
+            if options.capture_content and content_capture:
+                capture_options = options.content_capture_options or ContentCaptureOptions()
+                response_payloads = extract_gemini_grpc_response_content(
+                    response, content_capture, capture_options
+                )
+                if response_payloads:
+                    large_content_payloads.extend(response_payloads)
+
+            # Store all large content payloads
+            if large_content_payloads:
+                store_large_content(large_content_payloads)
 
             event = _build_metric_event(
                 trace_id=trace_id,
@@ -154,6 +195,7 @@ def _wrap_generate_content_sync(original_fn: Callable[..., Any]) -> Callable[...
                 latency_ms=(time.time() - t0) * 1000,
                 usage=usage,
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             _emit_metric_sync(event, options)
             return response
@@ -168,6 +210,7 @@ def _wrap_generate_content_sync(original_fn: Callable[..., Any]) -> Callable[...
                 usage=None,
                 error=str(e),
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             _emit_metric_sync(event, options)
             raise
@@ -190,12 +233,36 @@ def _wrap_generate_content_async(original_fn: Callable[..., Any]) -> Callable[..
         span_id = options.generate_span_id() if options.generate_span_id else str(uuid4())
         t0 = time.time()
 
+        # Layer 0: Content Capture - extract request content before API call
+        content_capture: ContentCapture | None = None
+        large_content_payloads: list[dict[str, Any]] = []
+        if options.capture_content:
+            capture_options = options.content_capture_options or ContentCaptureOptions()
+            content_capture, request_payloads = extract_gemini_grpc_request_content(
+                request, capture_options
+            )
+            if request_payloads:
+                large_content_payloads.extend(request_payloads)
+
         try:
             response = await original_fn(self, request, *args, **kwargs)
 
             usage = None
             if hasattr(response, 'usage_metadata'):
                 usage = normalize_gemini_grpc_usage(response.usage_metadata)
+
+            # Layer 0: Extract response content
+            if options.capture_content and content_capture:
+                capture_options = options.content_capture_options or ContentCaptureOptions()
+                response_payloads = extract_gemini_grpc_response_content(
+                    response, content_capture, capture_options
+                )
+                if response_payloads:
+                    large_content_payloads.extend(response_payloads)
+
+            # Store all large content payloads
+            if large_content_payloads:
+                store_large_content(large_content_payloads)
 
             event = _build_metric_event(
                 trace_id=trace_id,
@@ -205,6 +272,7 @@ def _wrap_generate_content_async(original_fn: Callable[..., Any]) -> Callable[..
                 latency_ms=(time.time() - t0) * 1000,
                 usage=usage,
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             await _emit_metric_async(event, options)
             return response
@@ -219,6 +287,7 @@ def _wrap_generate_content_async(original_fn: Callable[..., Any]) -> Callable[..
                 usage=None,
                 error=str(e),
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             await _emit_metric_async(event, options)
             raise

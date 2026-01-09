@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from .control_agent import ControlAgent, create_control_agent
+from .large_content import set_store_func
 from .control_types import (
     ControlAction,
     ControlAgentOptions,
@@ -293,6 +294,9 @@ async def _resolve_options(options: MeterOptions) -> MeterOptions:
         await control_agent.connect()
         _global_control_agent = control_agent
 
+        # Set up large content storage function
+        set_store_func(control_agent.store_large_content_sync)
+
         # Create sync-compatible emitter
         emit_metric = _create_sync_compatible_emitter(control_agent, options.emit_metric)
 
@@ -320,6 +324,11 @@ async def _resolve_options(options: MeterOptions) -> MeterOptions:
             api_key=api_key,
             server_url=options.server_url,
             fail_open=options.fail_open,
+            # Content capture options
+            capture_content=options.capture_content,
+            content_capture_options=options.content_capture_options,
+            capture_tool_calls=options.capture_tool_calls,
+            validate_tool_schemas=options.validate_tool_schemas,
         )
 
     # No API key - just return options as-is
@@ -514,6 +523,9 @@ async def uninstrument_async() -> None:
         await _global_control_agent.disconnect()
         _global_control_agent = None
 
+    # Clear large content storage function
+    set_store_func(None)
+
     uninstrument_openai()
     uninstrument_anthropic()
     uninstrument_gemini()
@@ -543,6 +555,9 @@ def uninstrument() -> None:
         else:
             _global_control_agent.disconnect_sync()
         _global_control_agent = None
+
+    # Clear large content storage function
+    set_store_func(None)
 
     # Stop the background event loop
     _stop_background_loop()
@@ -607,6 +622,8 @@ def get_control_agent() -> IControlAgent | None:
         The control agent if one was created, or None
     """
     return _global_control_agent
+
+
 
 
 def update_instrumentation_options(

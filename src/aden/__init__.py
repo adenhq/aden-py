@@ -27,6 +27,16 @@ from .types import (
     Provider,
     DEFAULT_CONTROL_SERVER,
     get_control_server_url,
+    # Layer 0: Content Capture
+    ContentReference,
+    MessageCapture,
+    ToolSchemaCapture,
+    RequestParamsCapture,
+    ContentCapture,
+    ContentCaptureOptions,
+    # Layer 6: Tool Call Deep Inspection
+    ToolCallCapture,
+    ToolCallValidationError,
 )
 
 # Unified instrumentation API
@@ -129,6 +139,16 @@ __all__ = [
     "Provider",
     "DEFAULT_CONTROL_SERVER",
     "get_control_server_url",
+    # Layer 0: Content Capture
+    "ContentReference",
+    "MessageCapture",
+    "ToolSchemaCapture",
+    "RequestParamsCapture",
+    "ContentCapture",
+    "ContentCaptureOptions",
+    # Layer 6: Tool Call Deep Inspection
+    "ToolCallCapture",
+    "ToolCallValidationError",
     # Errors
     "RequestCancelledError",
     "BudgetExceededError",

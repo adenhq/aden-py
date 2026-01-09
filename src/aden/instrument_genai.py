@@ -19,11 +19,18 @@ from uuid import uuid4
 from datetime import datetime
 
 from .call_stack import CallStackInfo, capture_call_stack
+from .content_capture import (
+    extract_gemini_request_content,
+    extract_gemini_response_content,
+)
+from .large_content import store_large_content
 from .normalize import NormalizedUsage
 from .types import (
     BeforeRequestAction,
     BeforeRequestContext,
     BeforeRequestResult,
+    ContentCapture,
+    ContentCaptureOptions,
     MeterOptions,
     MetricEvent,
     RequestCancelledError,
@@ -83,6 +90,7 @@ def _build_metric_event(
     error: str | None = None,
     metadata: dict[str, Any] | None = None,
     stack_info: CallStackInfo | None = None,
+    content_capture: ContentCapture | None = None,
 ) -> MetricEvent:
     """Builds a MetricEvent for GenAI with flat fields."""
     return MetricEvent(
@@ -107,6 +115,8 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
+        # Content capture
+        content_capture=content_capture,
     )
 
 
@@ -182,6 +192,16 @@ def _create_sync_wrapper(
         # Capture call stack before making the request
         stack_info = capture_call_stack(skip_frames=3)
 
+        # Layer 0: Content Capture - extract request content
+        content_capture: ContentCapture | None = None
+        large_content_payloads: list[dict[str, Any]] = []
+        if options.capture_content:
+            capture_options = options.content_capture_options or ContentCaptureOptions()
+            # GenAI uses kwargs with 'contents' key
+            content_capture, request_payloads = extract_gemini_request_content((), kwargs, capture_options)
+            if request_payloads:
+                large_content_payloads.extend(request_payloads)
+
         # Execute beforeRequest hook if present
         if options.before_request:
             context = BeforeRequestContext(
@@ -214,7 +234,21 @@ def _create_sync_wrapper(
 
             # For streaming, wrap the iterator
             if is_stream and hasattr(response, "__iter__"):
-                return _MeteredSyncStream(response, trace_id, span_id, model, t0, options, stack_info)
+                # Store large content from request before streaming
+                if large_content_payloads:
+                    store_large_content(large_content_payloads)
+                return _MeteredSyncStream(response, trace_id, span_id, model, t0, options, stack_info, content_capture)
+
+            # Layer 0: Extract response content
+            if options.capture_content and content_capture:
+                capture_options = options.content_capture_options or ContentCaptureOptions()
+                response_payloads = extract_gemini_response_content(response, content_capture, capture_options)
+                if response_payloads:
+                    large_content_payloads.extend(response_payloads)
+
+            # Store all large content payloads
+            if large_content_payloads:
+                store_large_content(large_content_payloads)
 
             # Non-streaming: emit metric immediately
             usage = _extract_usage_from_response(response)
@@ -226,6 +260,7 @@ def _create_sync_wrapper(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=usage,
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             _emit_metric_sync(event, options)
             return response
@@ -242,6 +277,7 @@ def _create_sync_wrapper(
                 usage=None,
                 error=str(e),
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             _emit_metric_sync(event, options)
             raise

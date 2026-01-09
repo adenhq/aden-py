@@ -580,3 +580,18 @@ class IControlAgent(Protocol):
     def get_policy(self) -> ControlPolicy | None:
         """Get current cached policy."""
         ...
+
+    async def store_large_content(self, content_payloads: list[dict[str, Any]]) -> None:
+        """Store large content items on the control server.
+
+        Used by Layer 0 content capture for storing content that exceeds
+        max_content_bytes threshold. Content is referenced via ContentReference.
+
+        Args:
+            content_payloads: List of content items to store, each containing:
+                - content_id: Unique ID for the content
+                - content_hash: SHA-256 hash of the content
+                - content: The actual content string or serialized data
+                - byte_size: Size of the content in bytes
+        """
+        ...

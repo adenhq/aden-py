@@ -15,15 +15,28 @@ from uuid import uuid4
 from datetime import datetime
 
 from .call_stack import CallStackInfo, capture_call_stack
+from .content_capture import (
+    StreamContentAccumulator,
+    extract_anthropic_request_content,
+    extract_anthropic_response_content,
+)
+from .large_content import store_large_content
 from .normalize import normalize_anthropic_usage
+from .tool_capture import (
+    ToolCallStreamAccumulator,
+    extract_anthropic_tool_calls,
+)
 from .types import (
     BeforeRequestAction,
     BeforeRequestContext,
     BeforeRequestResult,
+    ContentCapture,
+    ContentCaptureOptions,
     MeterOptions,
     MetricEvent,
     NormalizedUsage,
     RequestCancelledError,
+    ToolCallCapture,
 )
 
 logger = logging.getLogger("aden")
@@ -116,8 +129,16 @@ def _build_metric_event(
     error: str | None = None,
     metadata: dict[str, Any] | None = None,
     stack_info: CallStackInfo | None = None,
+    content_capture: ContentCapture | None = None,
+    tool_calls_captured: list[ToolCallCapture] | None = None,
 ) -> MetricEvent:
     """Builds a MetricEvent for Anthropic with flat fields."""
+    # Calculate tool validation errors count
+    tool_validation_errors_count = None
+    if tool_calls_captured:
+        errors = sum(1 for tc in tool_calls_captured if not tc.is_valid)
+        tool_validation_errors_count = errors if errors > 0 else None
+
     return MetricEvent(
         trace_id=trace_id,
         span_id=span_id,
@@ -134,7 +155,7 @@ def _build_metric_event(
         total_tokens=usage.total_tokens if usage else 0,
         cached_tokens=usage.cached_tokens if usage else 0,
         reasoning_tokens=usage.reasoning_tokens if usage else 0,
-        # Flatten tool calls
+        # Flatten tool calls (summary)
         tool_call_count=tool_call_count if tool_call_count and tool_call_count > 0 else None,
         tool_names=tool_names,
         metadata=metadata,
@@ -144,6 +165,11 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
+        # Layer 0: Content Capture
+        content_capture=content_capture,
+        # Layer 6: Tool Call Deep Inspection
+        tool_calls_captured=tool_calls_captured,
+        tool_validation_errors_count=tool_validation_errors_count,
     )
 
 
@@ -282,6 +308,8 @@ class MeteredAsyncStream:
         t0: float,
         options: MeterOptions,
         stack_info: CallStackInfo | None = None,
+        content_capture: ContentCapture | None = None,
+        tools_schema: list[dict[str, Any]] | None = None,
     ):
         self._stream = stream
         self._trace_id = trace_id
@@ -296,6 +324,19 @@ class MeteredAsyncStream:
         self._tool_names: list[str] = []
         self._done = False
         self._error: str | None = None
+        # Layer 0: Content Capture
+        self._content_capture = content_capture
+        self._content_accumulator: StreamContentAccumulator | None = None
+        if options.capture_content and content_capture:
+            capture_options = options.content_capture_options or ContentCaptureOptions()
+            self._content_accumulator = StreamContentAccumulator(
+                max_bytes=capture_options.max_content_bytes * 4
+            )
+        # Layer 6: Tool Call Deep Inspection
+        self._tools_schema = tools_schema
+        self._tool_call_accumulator: ToolCallStreamAccumulator | None = None
+        if options.capture_tool_calls:
+            self._tool_call_accumulator = ToolCallStreamAccumulator()
 
     def __aiter__(self) -> "MeteredAsyncStream":
         return self
@@ -318,14 +359,31 @@ class MeteredAsyncStream:
                             self._input_tokens = getattr(usage, "input_tokens", 0) or 0
 
                 # content_block_start: May contain tool_use
-                elif chunk_type == "content_block_start" and self._options.track_tool_calls:
-                    content_block = getattr(chunk, "content_block", None)
-                    if content_block:
-                        block_type = getattr(content_block, "type", None)
-                        if block_type == "tool_use":
-                            name = getattr(content_block, "name", None)
-                            if name:
-                                self._tool_names.append(name)
+                elif chunk_type == "content_block_start":
+                    if self._options.track_tool_calls:
+                        content_block = getattr(chunk, "content_block", None)
+                        if content_block:
+                            block_type = getattr(content_block, "type", None)
+                            if block_type == "tool_use":
+                                name = getattr(content_block, "name", None)
+                                if name:
+                                    self._tool_names.append(name)
+                    # Layer 6: Accumulate tool calls
+                    if self._tool_call_accumulator:
+                        self._tool_call_accumulator.process_anthropic_chunk(chunk)
+
+                # content_block_delta: Streaming content
+                elif chunk_type == "content_block_delta":
+                    # Layer 0: Accumulate text content
+                    if self._content_accumulator:
+                        delta = getattr(chunk, "delta", None)
+                        if delta and getattr(delta, "type", "") == "text_delta":
+                            text = getattr(delta, "text", "")
+                            if text:
+                                self._content_accumulator.add(text)
+                    # Layer 6: Accumulate tool call arguments
+                    if self._tool_call_accumulator:
+                        self._tool_call_accumulator.process_anthropic_chunk(chunk)
 
                 # message_delta: Contains final usage (output_tokens)
                 elif chunk_type == "message_delta":
@@ -360,6 +418,23 @@ class MeteredAsyncStream:
         """Emit the final metric when stream ends."""
         tool_count = len(self._tool_names) if self._tool_names else None
         tool_names_str = ",".join(self._tool_names) if self._tool_names else None
+
+        # Finalize Layer 0: Content Capture
+        content_capture = self._content_capture
+        if content_capture and self._content_accumulator:
+            capture_options = self._options.content_capture_options or ContentCaptureOptions()
+            self._content_accumulator.finalize(content_capture, capture_options)
+
+        # Finalize Layer 6: Tool Call Deep Inspection
+        tool_calls_captured: list[ToolCallCapture] | None = None
+        if self._tool_call_accumulator and self._tool_call_accumulator.has_tool_calls:
+            capture_options = self._options.content_capture_options or ContentCaptureOptions()
+            tool_calls_captured, _ = self._tool_call_accumulator.finalize(
+                self._tools_schema,
+                capture_options,
+                validate=self._options.validate_tool_schemas,
+            )
+
         event = _build_metric_event(
             trace_id=self._trace_id,
             span_id=self._span_id,
@@ -372,6 +447,8 @@ class MeteredAsyncStream:
             tool_names=tool_names_str,
             error=self._error,
             stack_info=self._stack_info,
+            content_capture=content_capture,
+            tool_calls_captured=tool_calls_captured,
         )
         await _emit_metric(event, self._options)
 
@@ -388,6 +465,8 @@ class MeteredSyncStream:
         t0: float,
         options: MeterOptions,
         stack_info: CallStackInfo | None = None,
+        content_capture: ContentCapture | None = None,
+        tools_schema: list[dict[str, Any]] | None = None,
     ):
         self._stream = stream
         self._trace_id = trace_id
@@ -402,6 +481,19 @@ class MeteredSyncStream:
         self._tool_names: list[str] = []
         self._done = False
         self._error: str | None = None
+        # Layer 0: Content Capture
+        self._content_capture = content_capture
+        self._content_accumulator: StreamContentAccumulator | None = None
+        if options.capture_content and content_capture:
+            capture_options = options.content_capture_options or ContentCaptureOptions()
+            self._content_accumulator = StreamContentAccumulator(
+                max_bytes=capture_options.max_content_bytes * 4
+            )
+        # Layer 6: Tool Call Deep Inspection
+        self._tools_schema = tools_schema
+        self._tool_call_accumulator: ToolCallStreamAccumulator | None = None
+        if options.capture_tool_calls:
+            self._tool_call_accumulator = ToolCallStreamAccumulator()
 
     def __iter__(self) -> "MeteredSyncStream":
         return self
@@ -421,14 +513,30 @@ class MeteredSyncStream:
                         if usage:
                             self._input_tokens = getattr(usage, "input_tokens", 0) or 0
 
-                elif chunk_type == "content_block_start" and self._options.track_tool_calls:
-                    content_block = getattr(chunk, "content_block", None)
-                    if content_block:
-                        block_type = getattr(content_block, "type", None)
-                        if block_type == "tool_use":
-                            name = getattr(content_block, "name", None)
-                            if name:
-                                self._tool_names.append(name)
+                elif chunk_type == "content_block_start":
+                    if self._options.track_tool_calls:
+                        content_block = getattr(chunk, "content_block", None)
+                        if content_block:
+                            block_type = getattr(content_block, "type", None)
+                            if block_type == "tool_use":
+                                name = getattr(content_block, "name", None)
+                                if name:
+                                    self._tool_names.append(name)
+                    # Layer 6: Accumulate tool calls
+                    if self._tool_call_accumulator:
+                        self._tool_call_accumulator.process_anthropic_chunk(chunk)
+
+                elif chunk_type == "content_block_delta":
+                    # Layer 0: Accumulate text content
+                    if self._content_accumulator:
+                        delta = getattr(chunk, "delta", None)
+                        if delta and getattr(delta, "type", "") == "text_delta":
+                            text = getattr(delta, "text", "")
+                            if text:
+                                self._content_accumulator.add(text)
+                    # Layer 6: Accumulate tool call arguments
+                    if self._tool_call_accumulator:
+                        self._tool_call_accumulator.process_anthropic_chunk(chunk)
 
                 elif chunk_type == "message_delta":
                     usage = getattr(chunk, "usage", None)
@@ -462,6 +570,23 @@ class MeteredSyncStream:
         """Emit the final metric when stream ends."""
         tool_count = len(self._tool_names) if self._tool_names else None
         tool_names_str = ",".join(self._tool_names) if self._tool_names else None
+
+        # Finalize Layer 0: Content Capture
+        content_capture = self._content_capture
+        if content_capture and self._content_accumulator:
+            capture_options = self._options.content_capture_options or ContentCaptureOptions()
+            self._content_accumulator.finalize(content_capture, capture_options)
+
+        # Finalize Layer 6: Tool Call Deep Inspection
+        tool_calls_captured: list[ToolCallCapture] | None = None
+        if self._tool_call_accumulator and self._tool_call_accumulator.has_tool_calls:
+            capture_options = self._options.content_capture_options or ContentCaptureOptions()
+            tool_calls_captured, _ = self._tool_call_accumulator.finalize(
+                self._tools_schema,
+                capture_options,
+                validate=self._options.validate_tool_schemas,
+            )
+
         event = _build_metric_event(
             trace_id=self._trace_id,
             span_id=self._span_id,
@@ -474,6 +599,8 @@ class MeteredSyncStream:
             tool_names=tool_names_str,
             error=self._error,
             stack_info=self._stack_info,
+            content_capture=content_capture,
+            tool_calls_captured=tool_calls_captured,
         )
         _emit_metric_sync(event, self._options)
 
@@ -501,6 +628,18 @@ def _create_async_wrapper(
         model = params.get("model", "unknown")
         t0 = time.time()
 
+        # Layer 0: Content Capture - extract request content before API call
+        content_capture: ContentCapture | None = None
+        large_content_payloads: list[dict[str, Any]] = []
+        if options.capture_content:
+            capture_options = options.content_capture_options or ContentCaptureOptions()
+            content_capture, request_payloads = extract_anthropic_request_content(params, capture_options)
+            if request_payloads:
+                large_content_payloads.extend(request_payloads)
+
+        # Store tools schema for Layer 6 validation
+        tools_schema = params.get("tools") if options.capture_tool_calls else None
+
         # Execute beforeRequest hook
         context = BeforeRequestContext(
             model=model,
@@ -522,15 +661,43 @@ def _create_async_wrapper(
 
             # Handle streaming
             if final_params.get("stream") and hasattr(response, "__aiter__"):
+                # Store large content from request before streaming
+                if large_content_payloads:
+                    store_large_content(large_content_payloads)
                 return MeteredAsyncStream(
                     response.__aiter__(), trace_id, span_id, model, t0, options,
                     stack_info=stack_info,
+                    content_capture=content_capture,
+                    tools_schema=tools_schema,
                 )
 
-            # Non-streaming response - extract tool calls
+            # Non-streaming response - extract tool calls (summary)
             tool_count, tool_names = (
                 _extract_tool_calls(response) if options.track_tool_calls else (None, None)
             )
+
+            # Layer 0: Extract response content
+            if options.capture_content and content_capture:
+                capture_options = options.content_capture_options or ContentCaptureOptions()
+                response_payloads = extract_anthropic_response_content(response, content_capture, capture_options)
+                if response_payloads:
+                    large_content_payloads.extend(response_payloads)
+
+            # Layer 6: Tool Call Deep Inspection
+            tool_calls_captured: list[ToolCallCapture] | None = None
+            if options.capture_tool_calls:
+                capture_options = options.content_capture_options or ContentCaptureOptions()
+                tool_calls_captured, tool_payloads = extract_anthropic_tool_calls(
+                    response, tools_schema, capture_options,
+                    validate=options.validate_tool_schemas,
+                )
+                if tool_payloads:
+                    large_content_payloads.extend(tool_payloads)
+
+            # Store all large content payloads
+            if large_content_payloads:
+                store_large_content(large_content_payloads)
+
             event = _build_metric_event(
                 trace_id=trace_id,
                 span_id=span_id,
@@ -542,6 +709,8 @@ def _create_async_wrapper(
                 tool_call_count=tool_count,
                 tool_names=tool_names,
                 stack_info=stack_info,
+                content_capture=content_capture,
+                tool_calls_captured=tool_calls_captured,
             )
             await _emit_metric(event, options)
             return response
@@ -556,6 +725,7 @@ def _create_async_wrapper(
                 usage=None,
                 error=str(e),
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             await _emit_metric(event, options)
             raise
@@ -585,6 +755,18 @@ def _create_sync_wrapper(
         model = params.get("model", "unknown")
         t0 = time.time()
 
+        # Layer 0: Content Capture - extract request content before API call
+        content_capture: ContentCapture | None = None
+        large_content_payloads: list[dict[str, Any]] = []
+        if options.capture_content:
+            capture_options = options.content_capture_options or ContentCaptureOptions()
+            content_capture, request_payloads = extract_anthropic_request_content(params, capture_options)
+            if request_payloads:
+                large_content_payloads.extend(request_payloads)
+
+        # Store tools schema for Layer 6 validation
+        tools_schema = params.get("tools") if options.capture_tool_calls else None
+
         context = BeforeRequestContext(
             model=model,
             stream=bool(params.get("stream")),
@@ -602,15 +784,43 @@ def _create_sync_wrapper(
             response = original_fn(self, **final_params)
 
             if final_params.get("stream") and hasattr(response, "__iter__"):
+                # Store large content from request before streaming
+                if large_content_payloads:
+                    store_large_content(large_content_payloads)
                 return MeteredSyncStream(
                     iter(response), trace_id, span_id, model, t0, options,
                     stack_info=stack_info,
+                    content_capture=content_capture,
+                    tools_schema=tools_schema,
                 )
 
-            # Extract tool calls
+            # Extract tool calls (summary for basic tracking)
             tool_count, tool_names = (
                 _extract_tool_calls(response) if options.track_tool_calls else (None, None)
             )
+
+            # Layer 0: Extract response content
+            if options.capture_content and content_capture:
+                capture_options = options.content_capture_options or ContentCaptureOptions()
+                response_payloads = extract_anthropic_response_content(response, content_capture, capture_options)
+                if response_payloads:
+                    large_content_payloads.extend(response_payloads)
+
+            # Layer 6: Tool Call Deep Inspection
+            tool_calls_captured: list[ToolCallCapture] | None = None
+            if options.capture_tool_calls:
+                capture_options = options.content_capture_options or ContentCaptureOptions()
+                tool_calls_captured, tool_payloads = extract_anthropic_tool_calls(
+                    response, tools_schema, capture_options,
+                    validate=options.validate_tool_schemas,
+                )
+                if tool_payloads:
+                    large_content_payloads.extend(tool_payloads)
+
+            # Store all large content payloads
+            if large_content_payloads:
+                store_large_content(large_content_payloads)
+
             event = _build_metric_event(
                 trace_id=trace_id,
                 span_id=span_id,
@@ -622,6 +832,8 @@ def _create_sync_wrapper(
                 tool_call_count=tool_count,
                 tool_names=tool_names,
                 stack_info=stack_info,
+                content_capture=content_capture,
+                tool_calls_captured=tool_calls_captured,
             )
             _emit_metric_sync(event, options)
             return response
@@ -636,6 +848,7 @@ def _create_sync_wrapper(
                 usage=None,
                 error=str(e),
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             _emit_metric_sync(event, options)
             raise

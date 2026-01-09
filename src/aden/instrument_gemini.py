@@ -15,11 +15,19 @@ from uuid import uuid4
 from datetime import datetime
 
 from .call_stack import CallStackInfo, capture_call_stack
+from .content_capture import (
+    StreamContentAccumulator,
+    extract_gemini_request_content,
+    extract_gemini_response_content,
+)
+from .large_content import store_large_content
 from .normalize import normalize_gemini_usage
 from .types import (
     BeforeRequestAction,
     BeforeRequestContext,
     BeforeRequestResult,
+    ContentCapture,
+    ContentCaptureOptions,
     MeterOptions,
     MetricEvent,
     NormalizedUsage,
@@ -74,6 +82,7 @@ def _build_metric_event(
     error: str | None = None,
     metadata: dict[str, Any] | None = None,
     stack_info: CallStackInfo | None = None,
+    content_capture: ContentCapture | None = None,
 ) -> MetricEvent:
     """Builds a MetricEvent for Gemini with flat fields."""
     return MetricEvent(
@@ -99,6 +108,8 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
+        # Content capture
+        content_capture=content_capture,
     )
 
 
@@ -233,6 +244,7 @@ class MeteredAsyncStreamResponse:
         t0: float,
         options: MeterOptions,
         stack_info: CallStackInfo | None = None,
+        content_capture: ContentCapture | None = None,
     ):
         self._stream = stream
         self._trace_id = trace_id
@@ -241,6 +253,8 @@ class MeteredAsyncStreamResponse:
         self._t0 = t0
         self._options = options
         self._stack_info = stack_info
+        self._content_capture = content_capture
+        self._content_accumulator = StreamContentAccumulator() if content_capture else None
         self._final_usage: NormalizedUsage | None = None
         self._done = False
         self._error: str | None = None
@@ -255,6 +269,14 @@ class MeteredAsyncStreamResponse:
             # Extract usage_metadata from chunk if present
             if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                 self._final_usage = normalize_gemini_usage(chunk.usage_metadata)
+
+            # Accumulate content for capture
+            if self._content_accumulator:
+                try:
+                    if hasattr(chunk, "text"):
+                        self._content_accumulator.add(chunk.text)
+                except Exception:
+                    pass
 
             return chunk
 
@@ -272,6 +294,18 @@ class MeteredAsyncStreamResponse:
 
     async def _emit_final_metric(self) -> None:
         """Emit the final metric when stream ends."""
+        # Finalize content capture
+        large_content_payloads: list[dict[str, Any]] = []
+        if self._content_capture and self._content_accumulator:
+            capture_options = self._options.content_capture_options or ContentCaptureOptions()
+            response_payloads = self._content_accumulator.finalize(self._content_capture, capture_options)
+            if response_payloads:
+                large_content_payloads.extend(response_payloads)
+
+        # Store large content if any
+        if large_content_payloads:
+            store_large_content(large_content_payloads)
+
         event = _build_metric_event(
             trace_id=self._trace_id,
             span_id=self._span_id,
@@ -281,6 +315,7 @@ class MeteredAsyncStreamResponse:
             usage=self._final_usage,
             error=self._error,
             stack_info=self._stack_info,
+            content_capture=self._content_capture,
         )
         await _emit_metric(event, self._options)
 
@@ -297,6 +332,7 @@ class MeteredSyncStreamResponse:
         t0: float,
         options: MeterOptions,
         stack_info: CallStackInfo | None = None,
+        content_capture: ContentCapture | None = None,
     ):
         self._response = response
         self._iterator: Iterator[Any] | None = None
@@ -306,6 +342,8 @@ class MeteredSyncStreamResponse:
         self._t0 = t0
         self._options = options
         self._stack_info = stack_info
+        self._content_capture = content_capture
+        self._content_accumulator = StreamContentAccumulator() if content_capture else None
         self._final_usage: NormalizedUsage | None = None
         self._done = False
         self._error: str | None = None
@@ -328,6 +366,14 @@ class MeteredSyncStreamResponse:
             if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                 self._final_usage = normalize_gemini_usage(chunk.usage_metadata)
 
+            # Accumulate content for capture
+            if self._content_accumulator:
+                try:
+                    if hasattr(chunk, "text"):
+                        self._content_accumulator.add(chunk.text)
+                except Exception:
+                    pass
+
             return chunk
 
         except StopIteration:
@@ -344,6 +390,18 @@ class MeteredSyncStreamResponse:
 
     def _emit_final_metric(self) -> None:
         """Emit the final metric when stream ends."""
+        # Finalize content capture
+        large_content_payloads: list[dict[str, Any]] = []
+        if self._content_capture and self._content_accumulator:
+            capture_options = self._options.content_capture_options or ContentCaptureOptions()
+            response_payloads = self._content_accumulator.finalize(self._content_capture, capture_options)
+            if response_payloads:
+                large_content_payloads.extend(response_payloads)
+
+        # Store large content if any
+        if large_content_payloads:
+            store_large_content(large_content_payloads)
+
         event = _build_metric_event(
             trace_id=self._trace_id,
             span_id=self._span_id,
@@ -353,6 +411,7 @@ class MeteredSyncStreamResponse:
             usage=self._final_usage,
             error=self._error,
             stack_info=self._stack_info,
+            content_capture=self._content_capture,
         )
         _emit_metric_sync(event, self._options)
 
@@ -381,6 +440,15 @@ def _wrap_generate_content(
         # Check for streaming
         stream = kwargs.get("stream", False)
 
+        # Layer 0: Content Capture - extract request content
+        content_capture: ContentCapture | None = None
+        large_content_payloads: list[dict[str, Any]] = []
+        if options.capture_content:
+            capture_options = options.content_capture_options or ContentCaptureOptions()
+            content_capture, request_payloads = extract_gemini_request_content(args, kwargs, capture_options)
+            if request_payloads:
+                large_content_payloads.extend(request_payloads)
+
         context = BeforeRequestContext(
             model=model_name,
             stream=stream,
@@ -398,15 +466,30 @@ def _wrap_generate_content(
 
             # Handle streaming response
             if stream and hasattr(response, "__iter__"):
+                # Store large content from request before streaming
+                if large_content_payloads:
+                    store_large_content(large_content_payloads)
                 return MeteredSyncStreamResponse(
                     response, trace_id, span_id, model_name, t0, options,
                     stack_info=stack_info,
+                    content_capture=content_capture,
                 )
 
             # Non-streaming response - extract usage
             usage = None
             if hasattr(response, "usage_metadata"):
                 usage = normalize_gemini_usage(response.usage_metadata)
+
+            # Layer 0: Extract response content
+            if options.capture_content and content_capture:
+                capture_options = options.content_capture_options or ContentCaptureOptions()
+                response_payloads = extract_gemini_response_content(response, content_capture, capture_options)
+                if response_payloads:
+                    large_content_payloads.extend(response_payloads)
+
+            # Store all large content payloads
+            if large_content_payloads:
+                store_large_content(large_content_payloads)
 
             event = _build_metric_event(
                 trace_id=trace_id,
@@ -416,6 +499,7 @@ def _wrap_generate_content(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=usage,
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             _emit_metric_sync(event, options)
             return response
@@ -430,6 +514,7 @@ def _wrap_generate_content(
                 usage=None,
                 error=str(e),
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             _emit_metric_sync(event, options)
             raise
@@ -460,6 +545,15 @@ def _wrap_generate_content_async(
 
         stream = kwargs.get("stream", False)
 
+        # Layer 0: Content Capture - extract request content
+        content_capture: ContentCapture | None = None
+        large_content_payloads: list[dict[str, Any]] = []
+        if options.capture_content:
+            capture_options = options.content_capture_options or ContentCaptureOptions()
+            content_capture, request_payloads = extract_gemini_request_content(args, kwargs, capture_options)
+            if request_payloads:
+                large_content_payloads.extend(request_payloads)
+
         context = BeforeRequestContext(
             model=model_name,
             stream=stream,
@@ -477,15 +571,30 @@ def _wrap_generate_content_async(
 
             # Handle streaming response
             if stream and hasattr(response, "__aiter__"):
+                # Store large content from request before streaming
+                if large_content_payloads:
+                    store_large_content(large_content_payloads)
                 return MeteredAsyncStreamResponse(
                     response.__aiter__(), trace_id, span_id, model_name, t0, options,
                     stack_info=stack_info,
+                    content_capture=content_capture,
                 )
 
             # Non-streaming response
             usage = None
             if hasattr(response, "usage_metadata"):
                 usage = normalize_gemini_usage(response.usage_metadata)
+
+            # Layer 0: Extract response content
+            if options.capture_content and content_capture:
+                capture_options = options.content_capture_options or ContentCaptureOptions()
+                response_payloads = extract_gemini_response_content(response, content_capture, capture_options)
+                if response_payloads:
+                    large_content_payloads.extend(response_payloads)
+
+            # Store all large content payloads
+            if large_content_payloads:
+                store_large_content(large_content_payloads)
 
             event = _build_metric_event(
                 trace_id=trace_id,
@@ -495,6 +604,7 @@ def _wrap_generate_content_async(
                 latency_ms=(time.time() - t0) * 1000,
                 usage=usage,
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             await _emit_metric(event, options)
             return response
@@ -509,6 +619,7 @@ def _wrap_generate_content_async(
                 usage=None,
                 error=str(e),
                 stack_info=stack_info,
+                content_capture=content_capture,
             )
             await _emit_metric(event, options)
             raise
