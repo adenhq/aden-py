@@ -43,6 +43,11 @@ from .instrument_genai import (
     is_genai_instrumented,
     uninstrument_genai,
 )
+from .instrument_dify import (
+    instrument_dify,
+    is_dify_instrumented,
+    uninstrument_dify,
+)
 from .instrument_openai import (
     instrument_openai,
     is_openai_instrumented,
@@ -377,6 +382,7 @@ async def instrument_async(options: MeterOptions) -> InstrumentationResultWithAg
     gemini_result = instrument_gemini(resolved_options)
     genai_result = instrument_genai(resolved_options)
     gemini_grpc_result = instrument_gemini_grpc(resolved_options)
+    dify_result = instrument_dify(resolved_options)
 
     result = InstrumentationResultWithAgent(
         openai=openai_result,
@@ -384,6 +390,7 @@ async def instrument_async(options: MeterOptions) -> InstrumentationResultWithAg
         gemini=gemini_result,
         genai=genai_result,
         gemini_grpc=gemini_grpc_result,
+        dify=dify_result,
         control_agent=_global_control_agent,
     )
 
@@ -399,6 +406,8 @@ async def instrument_async(options: MeterOptions) -> InstrumentationResultWithAg
         instrumented.append("genai")
     if result.gemini_grpc:
         instrumented.append("gemini_grpc")
+    if result.dify:
+        instrumented.append("dify")
 
     if instrumented:
         control_status = " + control agent" if _global_control_agent else ""
@@ -480,6 +489,7 @@ def instrument(options: MeterOptions) -> InstrumentationResult:
     gemini_result = instrument_gemini(options)
     genai_result = instrument_genai(options)
     gemini_grpc_result = instrument_gemini_grpc(options)
+    dify_result = instrument_dify(options)
 
     result = InstrumentationResult(
         openai=openai_result,
@@ -487,6 +497,7 @@ def instrument(options: MeterOptions) -> InstrumentationResult:
         gemini=gemini_result,
         genai=genai_result,
         gemini_grpc=gemini_grpc_result,
+        dify=dify_result,
     )
 
     # Log which SDKs were instrumented
@@ -501,6 +512,8 @@ def instrument(options: MeterOptions) -> InstrumentationResult:
         instrumented.append("genai")
     if result.gemini_grpc:
         instrumented.append("gemini_grpc")
+    if result.dify:
+        instrumented.append("dify")
 
     if instrumented:
         logger.info(f"[aden] Instrumented: {', '.join(instrumented)}")
@@ -531,6 +544,7 @@ async def uninstrument_async() -> None:
     uninstrument_gemini()
     uninstrument_genai()
     uninstrument_gemini_grpc()
+    uninstrument_dify()
 
     _global_options = None
     logger.info("[aden] All SDKs uninstrumented")
@@ -567,6 +581,7 @@ def uninstrument() -> None:
     uninstrument_gemini()
     uninstrument_genai()
     uninstrument_gemini_grpc()
+    uninstrument_dify()
 
     _global_options = None
     logger.info("[aden] All SDKs uninstrumented")
@@ -585,6 +600,7 @@ def get_instrumented_sdks() -> InstrumentationResult:
         gemini=is_gemini_instrumented(),
         genai=is_genai_instrumented(),
         gemini_grpc=is_gemini_grpc_instrumented(),
+        dify=is_dify_instrumented(),
     )
 
 
@@ -601,6 +617,7 @@ def is_instrumented() -> bool:
         or is_gemini_instrumented()
         or is_genai_instrumented()
         or is_gemini_grpc_instrumented()
+        or is_dify_instrumented()
     )
 
 
@@ -695,4 +712,8 @@ __all__ = [
     "instrument_gemini_grpc",
     "uninstrument_gemini_grpc",
     "is_gemini_grpc_instrumented",
+    # Dify
+    "instrument_dify",
+    "uninstrument_dify",
+    "is_dify_instrumented",
 ]
