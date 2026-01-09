@@ -113,6 +113,8 @@ from .emitters import (
     create_transform_emitter,
     create_noop_emitter,
     create_memory_emitter,
+    create_jsonl_emitter,
+    JsonlEmitter,
 )
 
 # File logging
@@ -206,6 +208,8 @@ __all__ = [
     "create_transform_emitter",
     "create_noop_emitter",
     "create_memory_emitter",
+    "create_jsonl_emitter",
+    "JsonlEmitter",
     # File logging
     "MetricFileLogger",
     "create_file_emitter",

@@ -6,11 +6,14 @@ Emitters are functions that receive MetricEvent objects and handle them
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from threading import Lock, Timer
 from typing import Any, Literal, TypeVar
 
@@ -397,3 +400,100 @@ def create_memory_emitter() -> MemoryEmitter:
         A MemoryEmitter instance with events list and clear() method
     """
     return MemoryEmitter()
+
+
+class JsonlEmitter:
+    """
+    An emitter that writes metrics to a local JSONL file.
+
+    Each MetricEvent is serialized as a single JSON line.
+
+    Attributes:
+        file_path: Path to the JSONL file
+        flush: Flush the file buffer to disk
+        close: Close the file handle
+    """
+
+    def __init__(
+        self,
+        file_path: str | Path,
+        append: bool = True,
+        flush_every: int = 1,
+    ):
+        """
+        Initialize the JSONL emitter.
+
+        Args:
+            file_path: Path to the JSONL file
+            append: If True, append to existing file; if False, overwrite
+            flush_every: Flush to disk every N events (default: 1 for durability)
+        """
+        self._file_path = Path(file_path)
+        self._flush_every = flush_every
+        self._count = 0
+        self._lock = Lock()
+
+        # Ensure parent directory exists
+        self._file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        mode = "a" if append else "w"
+        self._file = open(self._file_path, mode, encoding="utf-8")
+
+    def __call__(self, event: MetricEvent) -> None:
+        """Write an event to the JSONL file."""
+        try:
+            data = asdict(event)
+            line = json.dumps(data, default=str)
+
+            with self._lock:
+                self._file.write(line + "\n")
+                self._count += 1
+
+                if self._count >= self._flush_every:
+                    self._file.flush()
+                    self._count = 0
+        except Exception as e:
+            logger.error(f"Error writing metric to JSONL: {e}")
+
+    def flush(self) -> None:
+        """Flush the file buffer to disk."""
+        with self._lock:
+            self._file.flush()
+
+    def close(self) -> None:
+        """Close the file handle."""
+        with self._lock:
+            self._file.close()
+
+
+def create_jsonl_emitter(
+    file_path: str | Path,
+    append: bool = True,
+    flush_every: int = 1,
+) -> JsonlEmitter:
+    """
+    Creates an emitter that writes metrics to a local JSONL file.
+
+    Each MetricEvent is written as a single JSON line, making it easy to
+    process with tools like jq, pandas, or stream processors.
+
+    Args:
+        file_path: Path to the JSONL file (directories created if needed)
+        append: If True, append to existing file; if False, overwrite
+        flush_every: Flush to disk every N events (default: 1 for durability)
+
+    Returns:
+        A JsonlEmitter instance with flush() and close() methods
+
+    Example:
+        ```python
+        from aden import instrument, MeterOptions, create_jsonl_emitter
+
+        emitter = create_jsonl_emitter("./metrics.jsonl")
+        instrument(MeterOptions(emit_metric=emitter))
+
+        # When done
+        emitter.close()
+        ```
+    """
+    return JsonlEmitter(file_path, append, flush_every)

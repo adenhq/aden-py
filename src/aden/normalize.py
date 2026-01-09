@@ -143,17 +143,33 @@ def normalize_gemini_usage(usage_metadata: Any) -> NormalizedUsage | None:
         return None
 
     raw = _to_dict(usage_metadata)
-    if not raw:
-        return None
 
-    input_tokens = raw.get("promptTokenCount", 0) or raw.get("prompt_token_count", 0) or 0
-    output_tokens = raw.get("candidatesTokenCount", 0) or raw.get("candidates_token_count", 0) or 0
+    # Try dict access first (for JSON/dict responses), then getattr (for protobuf objects)
+    def get_field(camel_name: str, snake_name: str, default: int = 0) -> int:
+        # Try dict access with both naming conventions
+        if raw:
+            val = raw.get(camel_name) or raw.get(snake_name)
+            if val:
+                return val
+        # Fall back to getattr for protobuf objects
+        val = getattr(usage_metadata, snake_name, None)
+        if val:
+            return val
+        val = getattr(usage_metadata, camel_name, None)
+        if val:
+            return val
+        return default
+
+    input_tokens = get_field("promptTokenCount", "prompt_token_count", 0)
+    output_tokens = get_field("candidatesTokenCount", "candidates_token_count", 0)
+    total_tokens = get_field("totalTokenCount", "total_token_count", 0) or (input_tokens + output_tokens)
+    cached_tokens = get_field("cachedContentTokenCount", "cached_content_token_count", 0)
 
     return NormalizedUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        total_tokens=raw.get("totalTokenCount") or raw.get("total_token_count") or (input_tokens + output_tokens),
-        cached_tokens=raw.get("cachedContentTokenCount", 0) or raw.get("cached_content_token_count", 0) or 0,
+        total_tokens=total_tokens,
+        cached_tokens=cached_tokens,
         reasoning_tokens=0,  # Gemini doesn't expose reasoning tokens
         accepted_prediction_tokens=0,
         rejected_prediction_tokens=0,
