@@ -402,6 +402,12 @@ class MetricEvent:
     agent_stack: list[str] | None = None
     """Stack of agent/handler names leading to this call."""
 
+    agent_name: str | None = None
+    """Human-readable name for the agent that made this call.
+
+    Set via MeterOptions.agent_name or auto-inferred from call stack.
+    """
+
     # === Call Site (flat) ===
     call_site_file: str | None = None
     """File path where the call originated (immediate caller)."""
@@ -609,6 +615,25 @@ class MeterOptions:
 
     emit_metric: MetricEmitter
     """Custom metric emitter function."""
+
+    agent_name: str | None = None
+    """Human-readable name for this agent instance.
+
+    When provided, this name is attached to all metric events and heartbeats,
+    making it easy to identify and query metrics from specific agents.
+
+    If not provided, the SDK will attempt to auto-infer a name from the
+    call stack using heuristics (e.g., class names containing 'Agent',
+    'Handler', 'Runner', etc.).
+
+    Example:
+        ```python
+        instrument(MeterOptions(
+            agent_name="research-agent",
+            emit_metric=...,
+        ))
+        ```
+    """
 
     track_tool_calls: bool = True
     """Whether to include tool call metrics (count and names)."""

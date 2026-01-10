@@ -83,6 +83,7 @@ def _build_metric_event(
     metadata: dict[str, Any] | None = None,
     stack_info: CallStackInfo | None = None,
     content_capture: ContentCapture | None = None,
+    agent_name: str | None = None,
 ) -> MetricEvent:
     """Builds a MetricEvent for Gemini with flat fields."""
     return MetricEvent(
@@ -108,6 +109,7 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
+        agent_name=agent_name,
         # Content capture
         content_capture=content_capture,
     )
@@ -316,6 +318,7 @@ class MeteredAsyncStreamResponse:
             error=self._error,
             stack_info=self._stack_info,
             content_capture=self._content_capture,
+            agent_name=self._options.agent_name,
         )
         await _emit_metric(event, self._options)
 
@@ -412,6 +415,7 @@ class MeteredSyncStreamResponse:
             error=self._error,
             stack_info=self._stack_info,
             content_capture=self._content_capture,
+            agent_name=self._options.agent_name,
         )
         _emit_metric_sync(event, self._options)
 
@@ -500,6 +504,7 @@ def _wrap_generate_content(
                 usage=usage,
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             _emit_metric_sync(event, options)
             return response
@@ -515,6 +520,7 @@ def _wrap_generate_content(
                 error=str(e),
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             _emit_metric_sync(event, options)
             raise
@@ -605,6 +611,7 @@ def _wrap_generate_content_async(
                 usage=usage,
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             await _emit_metric(event, options)
             return response
@@ -620,6 +627,7 @@ def _wrap_generate_content_async(
                 error=str(e),
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             await _emit_metric(event, options)
             raise

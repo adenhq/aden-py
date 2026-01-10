@@ -60,6 +60,7 @@ class ControlAgent(IControlAgent):
             fail_open=options.fail_open,
             get_context_id=options.get_context_id or (lambda: None),
             instance_id=options.instance_id or str(uuid4()),
+            agent_name=options.agent_name,
             on_alert=options.on_alert or (lambda _: None),
             # Hybrid enforcement options
             server_validation_threshold=options.server_validation_threshold,
@@ -439,6 +440,7 @@ class ControlAgent(IControlAgent):
             event_type="heartbeat",
             timestamp=datetime.now().isoformat(),
             sdk_instance_id=self.options.instance_id or "",
+            agent_name=self.options.agent_name or "",
             status="healthy" if self._connected else "degraded",
             requests_since_last=self._requests_since_heartbeat,
             errors_since_last=self._errors_since_heartbeat,
@@ -1331,6 +1333,7 @@ class ControlAgent(IControlAgent):
             event_type="metric",
             timestamp=datetime.now().isoformat(),
             sdk_instance_id=self.options.instance_id or "",
+            agent_name=self.options.agent_name or "",
             data=event,
         )
 
@@ -1392,6 +1395,7 @@ class ControlAgent(IControlAgent):
             event_type="metric",
             timestamp=datetime.now().isoformat(),
             sdk_instance_id=self.options.instance_id or "",
+            agent_name=self.options.agent_name or "",
             data=event,
         )
 
@@ -1557,6 +1561,7 @@ class ControlAgent(IControlAgent):
             event_type="error",
             timestamp=datetime.now().isoformat(),
             sdk_instance_id=self.options.instance_id or "",
+            agent_name=self.options.agent_name or "",
             message=message,
             code=type(error).__name__ if error else None,
             stack=str(error) if error else None,

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
+from .call_stack import infer_agent_name
 from .control_agent import ControlAgent, create_control_agent
 from .large_content import set_store_func
 from .control_types import (
@@ -278,6 +279,9 @@ async def _resolve_options(options: MeterOptions) -> MeterOptions:
     # Check for API key (explicit or from environment)
     api_key = options.api_key or os.environ.get("ADEN_API_KEY")
 
+    # Infer agent_name if not provided
+    agent_name = options.agent_name or infer_agent_name(skip_frames=4)
+
     if api_key:
         # Create control agent
         control_agent = create_control_agent(
@@ -286,6 +290,7 @@ async def _resolve_options(options: MeterOptions) -> MeterOptions:
                 api_key=api_key,
                 fail_open=options.fail_open,
                 get_context_id=options.get_context_id,
+                agent_name=agent_name,
                 on_alert=options.on_alert,
             )
         )
@@ -310,6 +315,7 @@ async def _resolve_options(options: MeterOptions) -> MeterOptions:
         # Create new options with control agent integration
         return MeterOptions(
             emit_metric=emit_metric,
+            agent_name=agent_name,
             track_tool_calls=options.track_tool_calls,
             generate_trace_id=options.generate_trace_id,
             generate_span_id=options.generate_span_id,

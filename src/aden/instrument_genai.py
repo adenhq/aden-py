@@ -91,6 +91,7 @@ def _build_metric_event(
     metadata: dict[str, Any] | None = None,
     stack_info: CallStackInfo | None = None,
     content_capture: ContentCapture | None = None,
+    agent_name: str | None = None,
 ) -> MetricEvent:
     """Builds a MetricEvent for GenAI with flat fields."""
     return MetricEvent(
@@ -115,6 +116,7 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
+        agent_name=agent_name,
         # Content capture
         content_capture=content_capture,
     )
@@ -261,6 +263,7 @@ def _create_sync_wrapper(
                 usage=usage,
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             _emit_metric_sync(event, options)
             return response
@@ -278,6 +281,7 @@ def _create_sync_wrapper(
                 error=str(e),
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             _emit_metric_sync(event, options)
             raise
@@ -432,6 +436,7 @@ class _MeteredSyncStream:
             usage=self._final_usage,
             error=self._error,
             stack_info=self._stack_info,
+            agent_name=self._options.agent_name,
         )
         _emit_metric_sync(event, self._options)
 
@@ -497,6 +502,7 @@ class _MeteredAsyncStream:
             usage=self._final_usage,
             error=self._error,
             stack_info=self._stack_info,
+            agent_name=self._options.agent_name,
         )
         await _emit_metric(event, self._options)
 

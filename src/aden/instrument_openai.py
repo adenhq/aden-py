@@ -151,6 +151,7 @@ def _build_metric_event(
     stack_info: CallStackInfo | None = None,
     content_capture: ContentCapture | None = None,
     tool_calls_captured: list[ToolCallCapture] | None = None,
+    agent_name: str | None = None,
 ) -> MetricEvent:
     """Builds a MetricEvent for OpenAI with flat fields."""
     # Calculate tool validation errors count
@@ -186,6 +187,7 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
+        agent_name=agent_name,
         # Layer 0: Content Capture
         content_capture=content_capture,
         # Layer 6: Tool Call Deep Inspection
@@ -470,6 +472,7 @@ class MeteredAsyncStream:
             metadata=self._metadata,
             content_capture=content_capture,
             tool_calls_captured=tool_calls_captured,
+            agent_name=self._options.agent_name,
         )
         await _emit_metric(event, self._options)
 
@@ -655,6 +658,7 @@ class MeteredSyncStream:
             metadata=self._metadata,
             content_capture=content_capture,
             tool_calls_captured=tool_calls_captured,
+            agent_name=self._options.agent_name,
         )
         _emit_metric_sync(event, self._options)
 
@@ -796,6 +800,7 @@ def _create_async_wrapper(
                 metadata=request_metadata or None,
                 content_capture=content_capture,
                 tool_calls_captured=tool_calls_captured,
+                agent_name=options.agent_name,
             )
             await _emit_metric(event, options)
             return response
@@ -960,6 +965,7 @@ def _create_sync_wrapper(
                 metadata=request_metadata or None,
                 content_capture=content_capture,
                 tool_calls_captured=tool_calls_captured,
+                agent_name=options.agent_name,
             )
             _emit_metric_sync(event, options)
             return response

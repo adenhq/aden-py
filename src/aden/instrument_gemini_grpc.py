@@ -80,6 +80,7 @@ def _build_metric_event(
     metadata: dict[str, Any] | None = None,
     stack_info: CallStackInfo | None = None,
     content_capture: ContentCapture | None = None,
+    agent_name: str | None = None,
 ) -> MetricEvent:
     """Build a MetricEvent for Gemini gRPC calls."""
     return MetricEvent(
@@ -103,6 +104,7 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
+        agent_name=agent_name,
         content_capture=content_capture,
     )
 
@@ -196,6 +198,7 @@ def _wrap_generate_content_sync(original_fn: Callable[..., Any]) -> Callable[...
                 usage=usage,
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             _emit_metric_sync(event, options)
             return response
@@ -211,6 +214,7 @@ def _wrap_generate_content_sync(original_fn: Callable[..., Any]) -> Callable[...
                 error=str(e),
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             _emit_metric_sync(event, options)
             raise
@@ -273,6 +277,7 @@ def _wrap_generate_content_async(original_fn: Callable[..., Any]) -> Callable[..
                 usage=usage,
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             await _emit_metric_async(event, options)
             return response
@@ -288,6 +293,7 @@ def _wrap_generate_content_async(original_fn: Callable[..., Any]) -> Callable[..
                 error=str(e),
                 stack_info=stack_info,
                 content_capture=content_capture,
+                agent_name=options.agent_name,
             )
             await _emit_metric_async(event, options)
             raise

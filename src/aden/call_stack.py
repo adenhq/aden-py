@@ -197,3 +197,77 @@ def format_call_stack(info: CallStackInfo, max_entries: int = 10) -> str:
             lines.append(f"  ... and {len(info.call_stack) - max_entries} more")
 
     return "\n".join(lines)
+
+
+# Patterns for inferring agent names from class names
+AGENT_NAME_PATTERNS = [
+    "agent",
+    "handler",
+    "runner",
+    "executor",
+    "worker",
+    "assistant",
+    "bot",
+    "orchestrator",
+    "coordinator",
+    "processor",
+    "service",
+]
+
+
+def infer_agent_name(skip_frames: int = 3, max_depth: int = 30) -> str | None:
+    """
+    Infer an agent name from the call stack using heuristics.
+
+    Looks for class names that suggest an agent-like pattern (e.g., 'ResearchAgent',
+    'DataHandler', 'TaskRunner'). Returns the first matching class name found.
+
+    Args:
+        skip_frames: Number of frames to skip (default 3 for this function + callers)
+        max_depth: Maximum stack depth to search
+
+    Returns:
+        Inferred agent name or None if no agent-like class is found
+    """
+    try:
+        stack = inspect.stack()
+
+        for i, frame_info in enumerate(stack):
+            if i < skip_frames:
+                continue
+            if i >= skip_frames + max_depth:
+                break
+
+            frame = frame_info.frame
+            filename = frame.f_code.co_filename.lower()
+
+            # Skip internal SDK and library frames
+            if _should_skip_frame(frame):
+                continue
+
+            # Check for 'self' in locals to get class name
+            local_self = frame.f_locals.get("self")
+            if local_self is not None:
+                cls_name = type(local_self).__name__
+                cls_name_lower = cls_name.lower()
+
+                # Check if class name matches agent patterns
+                for pattern in AGENT_NAME_PATTERNS:
+                    if pattern in cls_name_lower:
+                        return cls_name
+
+            # Also check for 'cls' (class methods)
+            local_cls = frame.f_locals.get("cls")
+            if local_cls is not None and isinstance(local_cls, type):
+                cls_name = local_cls.__name__
+                cls_name_lower = cls_name.lower()
+
+                for pattern in AGENT_NAME_PATTERNS:
+                    if pattern in cls_name_lower:
+                        return cls_name
+
+    except Exception:
+        # Don't let inference errors break instrumentation
+        pass
+
+    return None

@@ -129,6 +129,9 @@ class MetricEventWrapper:
     sdk_instance_id: str = ""
     """SDK instance ID for tracking."""
 
+    agent_name: str = ""
+    """Human-readable agent name for this instance."""
+
 
 @dataclass
 class HeartbeatEvent:
@@ -161,6 +164,9 @@ class HeartbeatEvent:
     sdk_instance_id: str = ""
     """SDK instance ID for tracking."""
 
+    agent_name: str = ""
+    """Human-readable agent name for this instance."""
+
 
 @dataclass
 class ErrorEvent:
@@ -177,6 +183,9 @@ class ErrorEvent:
 
     sdk_instance_id: str = ""
     """SDK instance ID for tracking."""
+
+    agent_name: str = ""
+    """Human-readable agent name for this instance."""
 
     code: str | None = None
     """Error code (if available)."""
@@ -435,6 +444,13 @@ class ControlAgentOptions:
 
     instance_id: str | None = None
     """SDK instance identifier (auto-generated if not provided)."""
+
+    agent_name: str | None = None
+    """Human-readable name for this agent instance.
+
+    When provided, this name is attached to all metric events and heartbeats,
+    making it easy to identify and query metrics from specific agents.
+    """
 
     on_alert: AlertCallback | None = None
     """Callback invoked when an alert is triggered."""
