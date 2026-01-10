@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
-from .call_stack import infer_agent_name
 from .control_agent import ControlAgent, create_control_agent
 from .large_content import set_store_func
 from .control_types import (
@@ -279,8 +278,8 @@ async def _resolve_options(options: MeterOptions) -> MeterOptions:
     # Check for API key (explicit or from environment)
     api_key = options.api_key or os.environ.get("ADEN_API_KEY")
 
-    # Infer agent_name if not provided
-    agent_name = options.agent_name or infer_agent_name(skip_frames=4)
+    # agent_name is derived from agent_stack at request time if not explicitly set
+    agent_name = options.agent_name
 
     if api_key:
         # Create control agent

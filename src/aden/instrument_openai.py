@@ -187,7 +187,7 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
-        agent_name=agent_name,
+        agent_name=agent_name or (stack_info.agent_stack[0] if stack_info and stack_info.agent_stack else None),
         # Layer 0: Content Capture
         content_capture=content_capture,
         # Layer 6: Tool Call Deep Inspection
