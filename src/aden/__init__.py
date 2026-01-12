@@ -120,6 +120,17 @@ from .emitters import (
 # File logging
 from .file_logger import MetricFileLogger, create_file_emitter, DEFAULT_LOG_DIR
 
+# Agent context management
+from .agent_context import (
+    agent,
+    set_current_agent,
+    reset_agent,
+    get_current_agent,
+    get_current_agent_info,
+    get_current_agent_metadata,
+    AgentInfo,
+)
+
 __version__ = "0.2.0"
 
 __all__ = [
@@ -214,4 +225,12 @@ __all__ = [
     "MetricFileLogger",
     "create_file_emitter",
     "DEFAULT_LOG_DIR",
+    # Agent context management
+    "agent",
+    "set_current_agent",
+    "reset_agent",
+    "get_current_agent",
+    "get_current_agent_info",
+    "get_current_agent_metadata",
+    "AgentInfo",
 ]

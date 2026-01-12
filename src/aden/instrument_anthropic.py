@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from datetime import datetime
 
+from .agent_context import get_current_agent
 from .call_stack import CallStackInfo, capture_call_stack
 from .content_capture import (
     StreamContentAccumulator,
@@ -166,7 +167,7 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
-        agent_name=agent_name or (stack_info.agent_stack[0] if stack_info and stack_info.agent_stack else None),
+        agent_name=get_current_agent(stack_info, fallback_name=agent_name),
         # Layer 0: Content Capture
         content_capture=content_capture,
         # Layer 6: Tool Call Deep Inspection
@@ -622,7 +623,7 @@ def _create_async_wrapper(
             return await original_fn(self, *args, **kwargs)
 
         # Capture call stack before any async operations
-        stack_info = capture_call_stack(skip_frames=3)
+        stack_info = capture_call_stack(skip_frames=2)
 
         # Extract params - Anthropic messages.create uses kwargs
         params = kwargs.copy()
@@ -752,7 +753,7 @@ def _create_sync_wrapper(
             return original_fn(self, *args, **kwargs)
 
         # Capture call stack
-        stack_info = capture_call_stack(skip_frames=3)
+        stack_info = capture_call_stack(skip_frames=2)
 
         params = kwargs.copy()
 

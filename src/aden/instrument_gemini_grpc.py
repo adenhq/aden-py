@@ -17,6 +17,7 @@ from typing import Any, Callable
 from uuid import uuid4
 from datetime import datetime
 
+from .agent_context import get_current_agent
 from .call_stack import CallStackInfo, capture_call_stack
 from .content_capture import (
     extract_gemini_grpc_request_content,
@@ -104,7 +105,7 @@ def _build_metric_event(
         call_site_function=stack_info.call_site_function if stack_info else None,
         call_stack=stack_info.call_stack if stack_info else None,
         agent_stack=stack_info.agent_stack if stack_info else None,
-        agent_name=agent_name or (stack_info.agent_stack[0] if stack_info and stack_info.agent_stack else None),
+        agent_name=get_current_agent(stack_info, fallback_name=agent_name),
         content_capture=content_capture,
     )
 
@@ -144,7 +145,7 @@ def _wrap_generate_content_sync(original_fn: Callable[..., Any]) -> Callable[...
         if options is None:
             return original_fn(self, request, *args, **kwargs)
 
-        stack_info = capture_call_stack(skip_frames=3)
+        stack_info = capture_call_stack(skip_frames=2)
         model_name = _extract_model_name(request)
         trace_id = options.generate_trace_id() if options.generate_trace_id else str(uuid4())
         span_id = options.generate_span_id() if options.generate_span_id else str(uuid4())
@@ -231,7 +232,7 @@ def _wrap_generate_content_async(original_fn: Callable[..., Any]) -> Callable[..
         if options is None:
             return await original_fn(self, request, *args, **kwargs)
 
-        stack_info = capture_call_stack(skip_frames=3)
+        stack_info = capture_call_stack(skip_frames=2)
         model_name = _extract_model_name(request)
         trace_id = options.generate_trace_id() if options.generate_trace_id else str(uuid4())
         span_id = options.generate_span_id() if options.generate_span_id else str(uuid4())

@@ -11,6 +11,8 @@ from typing import Any
 
 
 # Known framework patterns to identify as agents
+# Format: (package_pattern, class_pattern)
+# If class_pattern is empty, any class from that package is considered an agent
 AGENT_PATTERNS = [
     # Google ADK
     ("google.adk", "Agent"),
@@ -30,10 +32,9 @@ AGENT_PATTERNS = [
     # AutoGen
     ("autogen", "Agent"),
     ("autogen", "AssistantAgent"),
-    # Generic patterns
-    ("agent", ""),
-    ("handler", ""),
-    ("runner", ""),
+    # OpenAI Agents SDK
+    ("openai_agents", "Agent"),
+    ("agents", "Agent"),
 ]
 
 # Packages to skip in call stack (internal SDK packages)
@@ -76,10 +77,16 @@ def _should_skip_frame(frame: Any) -> bool:
     filename = frame.f_code.co_filename
 
     # Skip frames from known internal packages
+    # Use site-packages or src/ patterns to identify actual package code
     for pkg in SKIP_PACKAGES:
-        if f"/{pkg}/" in filename or f"\\{pkg}\\" in filename:
+        # Match site-packages/pkg/ or src/pkg/ patterns
+        if f"/site-packages/{pkg}/" in filename or f"\\site-packages\\{pkg}\\" in filename:
             return True
-        if filename.endswith(f"/{pkg}.py") or filename.endswith(f"\\{pkg}.py"):
+        # Match src/pkg/ for development installs
+        if f"/src/{pkg}/" in filename or f"\\src\\{pkg}\\" in filename:
+            return True
+        # Match direct package imports (e.g., /pkg/__init__.py)
+        if filename.endswith(f"/{pkg}/__init__.py") or filename.endswith(f"\\{pkg}\\__init__.py"):
             return True
 
     # Skip <frozen> and built-in frames
@@ -115,7 +122,19 @@ def _is_agent_frame(frame: Any) -> str | None:
             cls_name = type(local_self).__name__
             return f"{cls_name}.{func_name}"
 
+    # Check class name patterns (for user-defined agent classes)
+    local_self = frame.f_locals.get("self")
+    if local_self is not None:
+        cls_name = type(local_self).__name__
+        cls_name_lower = cls_name.lower()
+        # Match class names containing agent-like patterns
+        if any(p in cls_name_lower for p in ["agent", "assistant", "bot", "orchestrator", "coordinator"]):
+            return f"{cls_name}.{func_name}"
+
     return None
+
+
+_DEBUG_STACK = False  # Set to True for debugging
 
 
 def capture_call_stack(skip_frames: int = 2, max_depth: int = 20) -> CallStackInfo:
@@ -137,6 +156,16 @@ def capture_call_stack(skip_frames: int = 2, max_depth: int = 20) -> CallStackIn
     try:
         # Get the current stack
         stack = inspect.stack()
+
+        if _DEBUG_STACK:
+            print("--- DEBUG capture_call_stack ---")
+            for i, fi in enumerate(stack[:15]):
+                frame = fi.frame
+                skip = _should_skip_frame(frame)
+                agent = _is_agent_frame(frame) if not skip else "SKIPPED"
+                fname = fi.filename.split('/')[-1]
+                print(f"  [{i}] {fname}:{fi.lineno} {fi.function} skip={skip} agent={agent}")
+            print("--- END DEBUG ---")
 
         for i, frame_info in enumerate(stack):
             if i < skip_frames:
