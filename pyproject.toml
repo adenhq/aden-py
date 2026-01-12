@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 authors = [
     { name = "Aden", email = "aden@example.com" }
 ]
-keywords = ["openai", "anthropic", "gemini", "llm", "metering", "cost", "usage", "billing", "erp", "livekit"]
+keywords = ["openai", "anthropic", "gemini", "dify", "llm", "metering", "cost", "usage", "billing", "erp", "livekit"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -46,6 +46,9 @@ gemini = [
 genai = [
     "google-genai>=1.0.0",
 ]
+dify = [
+    "dify-client>=0.1.10",
+]
 # Google ADK (uses google-genai internally)
 adk = [
     "google-adk>=0.1.0",
@@ -58,6 +61,7 @@ all = [
     "anthropic>=0.20.0",
     "google-generativeai>=0.4.0",
     "google-genai>=1.0.0",
+    "dify-client>=0.1.10",
 ]
 # PydanticAI framework
 pydantic-ai = [

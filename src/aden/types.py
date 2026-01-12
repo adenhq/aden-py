@@ -382,6 +382,19 @@ class MetricEvent:
     reasoning_tokens: int = 0
     """Reasoning tokens used (for o1/o3 models)."""
 
+    # === Cost (from providers that report it, e.g., Dify) ===
+    input_cost: float | None = None
+    """Cost for input/prompt tokens (USD)."""
+
+    output_cost: float | None = None
+    """Cost for output/completion tokens (USD)."""
+
+    total_cost: float | None = None
+    """Total cost for the request (USD)."""
+
+    currency: str | None = None
+    """Currency for cost fields (e.g., 'USD')."""
+
     # === Rate Limits (flat) ===
     rate_limit_remaining_requests: int | None = None
     """Remaining requests in current window."""
@@ -819,6 +832,9 @@ class InstrumentationResult:
     gemini_grpc: bool = False
     """Whether Google Gemini gRPC client was instrumented."""
 
+    dify: bool = False
+    """Whether Dify SDK was instrumented."""
+
     def __str__(self) -> str:
         instrumented = [name for name, success in [
             ("openai", self.openai),
@@ -826,6 +842,7 @@ class InstrumentationResult:
             ("gemini", self.gemini),
             ("genai", self.genai),
             ("gemini_grpc", self.gemini_grpc),
+            ("dify", self.dify),
         ] if success]
         if instrumented:
             return f"Instrumented: {', '.join(instrumented)}"
