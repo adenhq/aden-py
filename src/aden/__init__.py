@@ -18,6 +18,9 @@ from .types import (
     BeforeRequestContext,
     BeforeRequestResult,
     BeforeRequestAction,
+    # Prompt Control hooks
+    ModifyParamsHook,
+    ModifyParamsResult,
     BudgetConfig,
     BudgetExceededInfo,
     RequestCancelledError,
@@ -150,6 +153,9 @@ __all__ = [
     "BeforeRequestContext",
     "BeforeRequestResult",
     "BeforeRequestAction",
+    # Prompt Control hooks
+    "ModifyParamsHook",
+    "ModifyParamsResult",
     "BudgetConfig",
     "BudgetExceededInfo",
     "SDKClasses",

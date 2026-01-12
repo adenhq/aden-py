@@ -565,6 +565,42 @@ BeforeRequestHook = Callable[
 """Hook called before each API request, allowing user-defined rate limiting."""
 
 
+@dataclass
+class ModifyParamsResult:
+    """Result from the modify_params hook."""
+
+    params: dict[str, Any]
+    """The modified params to use for the request."""
+
+    original_params: dict[str, Any] | None = None
+    """Original params before modification (for diff tracking). Set automatically."""
+
+
+ModifyParamsHook = Callable[
+    [dict[str, Any], BeforeRequestContext],
+    dict[str, Any] | ModifyParamsResult | Awaitable[dict[str, Any] | ModifyParamsResult],
+]
+"""Hook called before each API request to modify request params (messages, tools, etc.).
+
+The hook receives the request params and context, and returns either:
+- Modified params dict directly
+- ModifyParamsResult with params and optional original for diff tracking
+
+Example - Inject system message:
+    def inject_system(params, context):
+        messages = params.get("messages", [])
+        messages.insert(0, {"role": "system", "content": "Always be helpful"})
+        return params
+
+Example - Conditional injection:
+    def conditional_inject(params, context):
+        if context.metadata.get("require_json"):
+            messages = params.get("messages", [])
+            messages.append({"role": "system", "content": "Respond in JSON"})
+        return params
+"""
+
+
 # Error callback type
 EmitErrorHandler = Callable[["MetricEvent", Exception], None]
 """Callback when metric emission fails."""
@@ -684,6 +720,19 @@ class MeterOptions:
 
     before_request: BeforeRequestHook | None = None
     """Hook called before each request for user-defined rate limiting."""
+
+    modify_params: "ModifyParamsHook | None" = None
+    """Hook called before each request to modify params (messages, tools, etc.).
+
+    This hook is called AFTER before_request and allows you to:
+    - Inject system messages
+    - Add/remove tools
+    - Modify message content
+    - Implement memory injection
+    - Apply context compaction
+
+    The hook receives params and context, returns modified params.
+    """
 
     request_metadata: dict[str, Any] | None = None
     """Custom metadata to pass to beforeRequest hook."""

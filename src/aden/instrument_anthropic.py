@@ -35,6 +35,7 @@ from .types import (
     ContentCaptureOptions,
     MeterOptions,
     MetricEvent,
+    ModifyParamsResult,
     NormalizedUsage,
     RequestCancelledError,
     ToolCallCapture,
@@ -288,6 +289,63 @@ def _handle_before_request_result_sync(
         return params
 
     return params
+
+
+async def _execute_modify_params_hook(
+    params: dict[str, Any],
+    context: BeforeRequestContext,
+    options: MeterOptions,
+) -> dict[str, Any]:
+    """Executes the modify_params hook if provided, returning modified params."""
+    if options.modify_params is None:
+        return params
+
+    try:
+        result = options.modify_params(params, context)
+        if asyncio.iscoroutine(result):
+            result = await result
+
+        # Handle both dict and ModifyParamsResult returns
+        if isinstance(result, ModifyParamsResult):
+            return result.params
+        elif isinstance(result, dict):
+            return result
+        else:
+            logger.warning(f"[aden] modify_params hook returned invalid type: {type(result)}, using original params")
+            return params
+    except Exception as e:
+        logger.error(f"[aden] modify_params hook failed: {e}, using original params")
+        return params
+
+
+def _execute_modify_params_hook_sync(
+    params: dict[str, Any],
+    context: BeforeRequestContext,
+    options: MeterOptions,
+) -> dict[str, Any]:
+    """Executes the modify_params hook synchronously, returning modified params."""
+    if options.modify_params is None:
+        return params
+
+    try:
+        result = options.modify_params(params, context)
+        if asyncio.iscoroutine(result):
+            # Close the unawaited coroutine to prevent warnings
+            result.close()
+            logger.warning("[aden] modify_params hook returned coroutine in sync context, using original params")
+            return params
+
+        # Handle both dict and ModifyParamsResult returns
+        if isinstance(result, ModifyParamsResult):
+            return result.params
+        elif isinstance(result, dict):
+            return result
+        else:
+            logger.warning(f"[aden] modify_params hook returned invalid type: {type(result)}, using original params")
+            return params
+    except Exception as e:
+        logger.error(f"[aden] modify_params hook failed: {e}, using original params")
+        return params
 
 
 class MeteredAsyncStream:
@@ -658,6 +716,9 @@ def _create_async_wrapper(
         result = await _execute_before_request_hook(params, context, options)
         final_params = await _handle_before_request_result(result, params, context)
 
+        # Execute modify_params hook for prompt injection/modification
+        final_params = await _execute_modify_params_hook(final_params, context, options)
+
         # Update model if degraded
         model = final_params.get("model", model)
 
@@ -785,6 +846,10 @@ def _create_sync_wrapper(
 
         result = _execute_before_request_hook_sync(params, context, options)
         final_params = _handle_before_request_result_sync(result, params, context)
+
+        # Execute modify_params hook for prompt injection/modification
+        final_params = _execute_modify_params_hook_sync(final_params, context, options)
+
         model = final_params.get("model", model)
 
         try:

@@ -31,6 +31,7 @@ from .types import (
     ContentCaptureOptions,
     MeterOptions,
     MetricEvent,
+    ModifyParamsResult,
     NormalizedUsage,
     RequestCancelledError,
 )
@@ -229,6 +230,100 @@ def _handle_before_request_result_sync(
         if result.delay_ms > 0:
             time.sleep(result.delay_ms / 1000)
         return
+
+
+def _build_gemini_params(args: tuple, kwargs: dict) -> dict[str, Any]:
+    """Build a params dict from Gemini generate_content args/kwargs.
+
+    Gemini's generate_content signature:
+        generate_content(contents, generation_config=None, safety_settings=None, stream=False, ...)
+    """
+    params: dict[str, Any] = {}
+
+    # First positional arg is 'contents'
+    if args:
+        params["contents"] = args[0]
+
+    # Merge in kwargs
+    params.update(kwargs)
+
+    return params
+
+
+def _extract_gemini_args_kwargs(
+    params: dict[str, Any],
+    original_args: tuple,
+) -> tuple[tuple, dict]:
+    """Extract args and kwargs from modified params dict."""
+    # 'contents' goes back to first positional arg if it was there
+    new_args = original_args
+    new_kwargs = params.copy()
+
+    if original_args and "contents" in new_kwargs:
+        # Contents was a positional arg, put it back
+        new_args = (new_kwargs.pop("contents"),) + original_args[1:]
+    elif not original_args and "contents" in new_kwargs:
+        # Contents was in kwargs originally, keep it there
+        pass
+
+    return new_args, new_kwargs
+
+
+async def _execute_modify_params_hook(
+    params: dict[str, Any],
+    context: BeforeRequestContext,
+    options: MeterOptions,
+) -> dict[str, Any]:
+    """Executes the modify_params hook if provided, returning modified params."""
+    if options.modify_params is None:
+        return params
+
+    try:
+        result = options.modify_params(params, context)
+        if asyncio.iscoroutine(result):
+            result = await result
+
+        # Handle both dict and ModifyParamsResult returns
+        if isinstance(result, ModifyParamsResult):
+            return result.params
+        elif isinstance(result, dict):
+            return result
+        else:
+            logger.warning(f"[aden] modify_params hook returned invalid type: {type(result)}, using original params")
+            return params
+    except Exception as e:
+        logger.error(f"[aden] modify_params hook failed: {e}, using original params")
+        return params
+
+
+def _execute_modify_params_hook_sync(
+    params: dict[str, Any],
+    context: BeforeRequestContext,
+    options: MeterOptions,
+) -> dict[str, Any]:
+    """Executes the modify_params hook synchronously, returning modified params."""
+    if options.modify_params is None:
+        return params
+
+    try:
+        result = options.modify_params(params, context)
+        if asyncio.iscoroutine(result):
+            # Close the unawaited coroutine to prevent warnings
+            result.close()
+            logger.warning("[aden] modify_params hook returned coroutine in sync context, using original params")
+            return params
+
+        # Handle both dict and ModifyParamsResult returns
+        if isinstance(result, ModifyParamsResult):
+            return result.params
+        elif isinstance(result, dict):
+            return result
+        else:
+            logger.warning(f"[aden] modify_params hook returned invalid type: {type(result)}, using original params")
+            return params
+    except Exception as e:
+        logger.error(f"[aden] modify_params hook failed: {e}, using original params")
+        return params
 
 
 class MeteredAsyncStreamResponse:
@@ -466,8 +561,17 @@ def _wrap_generate_content(
         result = _execute_before_request_hook_sync(model_name, context, options)
         _handle_before_request_result_sync(result, context)
 
+        # Build params dict for modify_params hook
+        params = _build_gemini_params(args, kwargs)
+
+        # Execute modify_params hook for content injection/modification
+        modified_params = _execute_modify_params_hook_sync(params, context, options)
+
+        # Extract modified args/kwargs
+        final_args, final_kwargs = _extract_gemini_args_kwargs(modified_params, args)
+
         try:
-            response = original_fn(*args, **kwargs)
+            response = original_fn(*final_args, **final_kwargs)
 
             # Handle streaming response
             if stream and hasattr(response, "__iter__"):
@@ -573,8 +677,17 @@ def _wrap_generate_content_async(
         result = await _execute_before_request_hook(model_name, context, options)
         await _handle_before_request_result(result, context)
 
+        # Build params dict for modify_params hook
+        params = _build_gemini_params(args, kwargs)
+
+        # Execute modify_params hook for content injection/modification
+        modified_params = await _execute_modify_params_hook(params, context, options)
+
+        # Extract modified args/kwargs
+        final_args, final_kwargs = _extract_gemini_args_kwargs(modified_params, args)
+
         try:
-            response = await original_fn(*args, **kwargs)
+            response = await original_fn(*final_args, **final_kwargs)
 
             # Handle streaming response
             if stream and hasattr(response, "__aiter__"):
