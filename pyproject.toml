@@ -90,6 +90,7 @@ dev = [
     "python-dotenv>=1.0.0",
     "autogen-agentchat>=0.7.5",
     "autogen-ext[openai,anthropic,gemini]>=0.7.5",
+    "crewai>=0.86.0",
 ]
 
 [project.urls]
