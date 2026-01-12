@@ -139,6 +139,23 @@ from .agent_context import (
     AgentInfo,
 )
 
+# Declarative configuration
+from .declarative_config import (
+    DeclarativeConfig,
+    SystemInjection,
+    MessageInjection,
+    ToolInjection,
+    CompactionConfig,
+    ToolInstructionConfig,
+    build_modify_params_hook,
+    # Convenience functions
+    system_injection,
+    tool_injection,
+    context_compaction,
+    enforce_tool_use,
+    from_dict as config_from_dict,
+)
+
 __version__ = "0.2.0"
 
 __all__ = [
@@ -247,4 +264,17 @@ __all__ = [
     "get_current_agent_info",
     "get_current_agent_metadata",
     "AgentInfo",
+    # Declarative configuration
+    "DeclarativeConfig",
+    "SystemInjection",
+    "MessageInjection",
+    "ToolInjection",
+    "CompactionConfig",
+    "ToolInstructionConfig",
+    "build_modify_params_hook",
+    "system_injection",
+    "tool_injection",
+    "context_compaction",
+    "enforce_tool_use",
+    "config_from_dict",
 ]
