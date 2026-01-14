@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
@@ -438,7 +438,7 @@ class ControlAgent(IControlAgent):
         """Send heartbeat event."""
         event = HeartbeatEvent(
             event_type="heartbeat",
-            timestamp=datetime.now().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             sdk_instance_id=self.options.instance_id or "",
             agent_name=self.options.agent_name or "",
             status="healthy" if self._connected else "degraded",
@@ -640,7 +640,7 @@ class ControlAgent(IControlAgent):
                     context_id=request.context_id,
                     provider=request.provider,
                     model=request.model,
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                 )
 
                 # Fire and forget
@@ -1331,7 +1331,7 @@ class ControlAgent(IControlAgent):
 
         wrapper = MetricEventWrapper(
             event_type="metric",
-            timestamp=datetime.now().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             sdk_instance_id=self.options.instance_id or "",
             agent_name=self.options.agent_name or "",
             data=event,
@@ -1393,7 +1393,7 @@ class ControlAgent(IControlAgent):
 
         wrapper = MetricEventWrapper(
             event_type="metric",
-            timestamp=datetime.now().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             sdk_instance_id=self.options.instance_id or "",
             agent_name=self.options.agent_name or "",
             data=event,
@@ -1530,7 +1530,7 @@ class ControlAgent(IControlAgent):
     async def report_control_event(self, event: ControlEvent) -> None:
         """Report a control event to the server."""
         event.event_type = "control"
-        event.timestamp = datetime.now().isoformat()
+        event.timestamp = datetime.now(timezone.utc).isoformat()
         event.sdk_instance_id = self.options.instance_id or ""
         await self._send_event(event)
 
@@ -1543,7 +1543,7 @@ class ControlAgent(IControlAgent):
         self._start_sync_flush_thread()
 
         event.event_type = "control"
-        event.timestamp = datetime.now().isoformat()
+        event.timestamp = datetime.now(timezone.utc).isoformat()
         event.sdk_instance_id = self.options.instance_id or ""
 
         # Queue event - background thread flushes periodically
@@ -1559,7 +1559,7 @@ class ControlAgent(IControlAgent):
 
         event = ErrorEvent(
             event_type="error",
-            timestamp=datetime.now().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             sdk_instance_id=self.options.instance_id or "",
             agent_name=self.options.agent_name or "",
             message=message,

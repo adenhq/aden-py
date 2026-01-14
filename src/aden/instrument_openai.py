@@ -12,7 +12,7 @@ from functools import wraps
 from typing import Any, AsyncIterator, Callable, Iterator
 from uuid import uuid4
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .agent_context import get_current_agent
 from .call_stack import CallStackInfo, capture_call_stack
@@ -168,7 +168,7 @@ def _build_metric_event(
         provider="openai",
         model=model,
         stream=stream,
-        timestamp=datetime.now().isoformat(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
         latency_ms=latency_ms,
         request_id=request_id,
         error=error,
@@ -771,7 +771,7 @@ def _create_async_wrapper(
             stream=bool(params.get("stream")),
             span_id=span_id,
             trace_id=trace_id,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             metadata=options.request_metadata,
         )
 
@@ -933,7 +933,7 @@ def _create_sync_wrapper(
             stream=bool(params.get("stream")),
             span_id=span_id,
             trace_id=trace_id,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             metadata=options.request_metadata,
         )
 

@@ -8,7 +8,7 @@ enabling offline analysis, debugging, and compliance auditing.
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -66,7 +66,7 @@ class MetricFileLogger:
 
     def _get_session_file(self, session_id: str) -> Path:
         """Get the log file path for a session."""
-        date_str = datetime.now().strftime('%Y-%m-%d')
+        date_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         date_dir = self.log_dir / date_str
         date_dir.mkdir(exist_ok=True)
 
@@ -93,7 +93,7 @@ class MetricFileLogger:
         file_path = self._get_session_file(session_id)
 
         event = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "session_id": session_id,
             "event_type": event_type,
             **data,
