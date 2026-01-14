@@ -321,7 +321,7 @@ class ControlAgent(IControlAgent):
         return ControlPolicy(
             version=data.get("version", "unknown"),
             updated_at=data.get("updated_at", ""),
-            budgets=[self._parse_budget(b) for b in data.get("budgets", [])],
+            budgets=[self._parse_budget(b) for b in (data.get("budgets") or [])],
             throttles=[
                 ThrottleRule(
                     context_id=t.get("context_id"),
@@ -329,7 +329,7 @@ class ControlAgent(IControlAgent):
                     requests_per_minute=t.get("requests_per_minute"),
                     delay_ms=t.get("delay_ms"),
                 )
-                for t in data.get("throttles", [])
+                for t in (data.get("throttles") or [])
             ],
             blocks=[
                 BlockRule(
@@ -338,7 +338,7 @@ class ControlAgent(IControlAgent):
                     provider=b.get("provider"),
                     model_pattern=b.get("model_pattern"),
                 )
-                for b in data.get("blocks", [])
+                for b in (data.get("blocks") or [])
             ],
             degradations=[
                 DegradeRule(
@@ -348,7 +348,7 @@ class ControlAgent(IControlAgent):
                     threshold_percent=d.get("threshold_percent"),
                     context_id=d.get("context_id"),
                 )
-                for d in data.get("degradations", [])
+                for d in (data.get("degradations") or [])
             ],
             alerts=[
                 AlertRule(
@@ -360,7 +360,7 @@ class ControlAgent(IControlAgent):
                     model_pattern=a.get("model_pattern"),
                     threshold_percent=a.get("threshold_percent"),
                 )
-                for a in data.get("alerts", [])
+                for a in (data.get("alerts") or [])
             ],
         )
 
@@ -1518,7 +1518,7 @@ class ControlAgent(IControlAgent):
                                 "cached_input": rates.get("cached_input", rates.get("input", 1.0) * 0.25),
                             }
                             # Index aliases
-                            for alias in rates.get("aliases", []):
+                            for alias in (rates.get("aliases") or []):
                                 self._pricing_aliases[alias.lower()] = model_lower
 
                         logger.debug(f"[aden] Loaded pricing for {len(self._pricing_cache)} models")

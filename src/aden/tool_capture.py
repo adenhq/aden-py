@@ -55,7 +55,7 @@ def extract_openai_tool_calls(
     if choices:
         first_choice = choices[0] if isinstance(choices[0], dict) else {}
         message = first_choice.get("message", {})
-        tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else []
+        tool_calls = (message.get("tool_calls") or []) if isinstance(message, dict) else []
 
         for idx, tc in enumerate(tool_calls):
             if not isinstance(tc, dict):

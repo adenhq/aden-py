@@ -508,7 +508,7 @@ def from_dict(config_dict: dict[str, Any]) -> DeclarativeConfig:
         config = from_dict(config_dict)
     """
     injections = []
-    for inj in config_dict.get("injections", []):
+    for inj in (config_dict.get("injections") or []):
         if "role" in inj and inj["role"] != "system":
             injections.append(MessageInjection(**inj))
         else:
@@ -517,7 +517,7 @@ def from_dict(config_dict: dict[str, Any]) -> DeclarativeConfig:
             injections.append(SystemInjection(**inj_copy))
 
     tool_injections = [
-        ToolInjection(**ti) for ti in config_dict.get("tool_injections", [])
+        ToolInjection(**ti) for ti in (config_dict.get("tool_injections") or [])
     ]
 
     compaction = None
