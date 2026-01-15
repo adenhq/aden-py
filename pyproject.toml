@@ -117,3 +117,10 @@ warn_unused_ignores = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "anthropic-haystack>=5.1.0",
+    "google-ai-haystack>=5.4.0.post1",
+    "haystack-ai>=2.22.0",
+]
